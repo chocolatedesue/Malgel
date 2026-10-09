@@ -13,7 +13,9 @@ use gpui_kit::{
     StyledImage as _, WeakEntity, Window,
     base::{TextView, TextViewState},
     component::{
-        ActiveTheme as _, Icon, Sizable as _, h_flex,
+        ActiveTheme as _, Icon, Sizable as _,
+        button::Button,
+        h_flex,
         text::{
             InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode,
             MarkdownParseContext, MarkdownPlugin, markdown_ast::Node,
@@ -26,6 +28,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    actions::ViewDiagram,
     analysis::content_hash,
     diagram::{self, DiagramTheme},
     math::{self, MathStyle},
@@ -198,6 +201,7 @@ impl MarkdownPlugin for AlertPlugin {
                 this.child(
                     TextView::markdown(id, alert.body.clone())
                         .markdown_extensions(self.body_extensions.clone())
+                        .on_link_click(crate::links::on_click)
                         .w_full(),
                 )
             })
@@ -587,7 +591,7 @@ fn hex_over(color: Hsla, background: Hsla) -> String {
 }
 
 /// The diagram colors that match the app's theme.
-fn diagram_theme(cx: &App) -> DiagramTheme {
+pub(crate) fn diagram_theme(cx: &App) -> DiagramTheme {
     let theme = cx.theme();
     let background = theme.background;
     let hex = |color: Hsla| hex_over(color, background);
@@ -663,15 +667,54 @@ impl MarkdownPlugin for MermaidPlugin {
         let content = match self.cache.get(source, theme, cx) {
             DiagramLookup::Ready(diagram) => {
                 let width = diagram.width * scale;
+                let source = SharedString::from(source.clone());
+                let open = move |window: &mut Window, cx: &mut App| {
+                    window.dispatch_action(Box::new(ViewDiagram(source.clone())), cx)
+                };
+                let open_from_button = open.clone();
                 h_flex()
                     .w_full()
                     .justify_center()
                     .child(
-                        img(diagram.image.clone())
-                            .object_fit(ObjectFit::Contain)
+                        div()
+                            .id(SharedString::from(format!("{id}-view")))
+                            .group("diagram")
+                            .relative()
                             .w_full()
                             .max_w(px(width))
-                            .aspect_ratio(diagram.width / diagram.height),
+                            .cursor_pointer()
+                            .on_click(move |event, window, cx| {
+                                if !event.is_right_click() {
+                                    open(window, cx);
+                                }
+                            })
+                            .child(
+                                img(diagram.image.clone())
+                                    .object_fit(ObjectFit::Contain)
+                                    .w_full()
+                                    .aspect_ratio(diagram.width / diagram.height),
+                            )
+                            .child(
+                                // Shown on hover, so it's clear a click opens the
+                                // diagram larger.
+                                div()
+                                    .absolute()
+                                    .top_1()
+                                    .right_1()
+                                    .invisible()
+                                    .group_hover("diagram", |style| style.visible())
+                                    .child(
+                                        Button::new(SharedString::from(format!("{id}-expand")))
+                                            .icon(Icon::new(IconName::Maximize))
+                                            .small()
+                                            .outline()
+                                            .tooltip("Open larger")
+                                            .on_click(move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                open_from_button(window, cx)
+                                            }),
+                                    ),
+                            ),
                     )
                     .into_any_element()
             }

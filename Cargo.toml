@@ -62,6 +62,9 @@ base64 = "0.22"
 # Files the system asks Malgel to open arrive on another thread.
 futures = "0.3"
 url = "2"
+# The SVG renderer GPUI draws with: the diagram viewer draws the part of a
+# zoomed diagram in view with it, so it stays sharp.
+resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 # System fonts give exported PDFs coverage the bundled fonts lack (CJK, emoji).
 fontdb = "0.23"
 # Picks A4 or US Letter for exports from the system locale.
@@ -100,8 +103,6 @@ winresource = { version = "0.1.31", default-features = false }
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.0", features = ["test-support"] }
-# The SVG renderer GPUI draws with, to check diagrams in tests.
-resvg = { version = "0.46", default-features = false, features = ["text"] }
 
 # Dependencies are large (GPUI, tree-sitter grammars, Typst); full debug info
 # for them makes every test binary hundreds of megabytes.

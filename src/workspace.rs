@@ -4,8 +4,10 @@
 //! changed by other programs, and remembers the session.
 
 use std::{
+    cell::Cell,
     collections::HashSet,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
     time::Duration,
 };
@@ -19,6 +21,7 @@ use gpui_kit::{
     component::{
         ActiveTheme as _, Icon, IndexPath, Selectable as _, Sizable as _, TitleBar, WindowExt as _,
         button::{Button, ButtonGroup, ButtonVariants as _},
+        checkbox::Checkbox,
         command::{Command, CommandItem, CommandState},
         dialog::DialogFooter,
         h_flex,
@@ -26,6 +29,7 @@ use gpui_kit::{
         link::Link,
         menu::AppMenuBar,
         notification::Notification,
+        radio::RadioGroup,
         resizable::{h_resizable, resizable_panel},
         scroll::ScrollableElement as _,
         status_bar::StatusBar,
@@ -40,16 +44,17 @@ use gpui_kit::{
 use crate::{
     actions::*,
     analysis::{Analysis, content_hash},
-    default_app,
+    default_app, diagram_viewer,
     document::{self, LineEnding, display_name, is_markdown_path},
     document_view::{DocumentEvent, DocumentView},
     docx, export,
     file_tree::{FileTree, FileTreeEvent},
     format,
+    links::{self, LinkTarget},
     pdf::{self, Paper},
     rich_copy,
     session::{self, DiskStamp, Session, SessionDocument, WindowPlacement},
-    settings::{Appearance, Layout, clamp_font_size},
+    settings::{Appearance, Layout, LinkPlacement, clamp_font_size},
     spell,
     themes::{self, AppSettings},
 };
@@ -66,9 +71,21 @@ enum AfterConfirm {
     NewFile,
     OpenDialog,
     OpenPath(PathBuf),
+    /// Open a linked document in place of the current one, at a heading.
+    OpenLink(PathBuf, Option<String>),
     CloseDocument(EntityId),
     CloseWindow,
     Quit,
+}
+
+/// Where a document being opened goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// A new tab when tabs are on, otherwise in place of the current
+    /// document.
+    Default,
+    NewTab,
+    ReplaceActive,
 }
 
 /// What the watcher found for one open file.
@@ -421,12 +438,20 @@ impl Workspace {
                 );
                 return;
             }
-            self.load_path(path, window, cx);
+            self.load_path(path, Placement::Default, None, window, cx);
         }
     }
 
-    /// Read `path` in the background and show it.
-    fn load_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Read `path` in the background and show it where `placement` says,
+    /// scrolled to the heading `anchor` names, if any.
+    fn load_path(
+        &mut self,
+        path: PathBuf,
+        placement: Placement,
+        anchor: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let read_path = path.clone();
         let task = cx
             .background_executor()
@@ -446,10 +471,19 @@ impl Workspace {
                         )
                     });
                     let active = this.active_document().read(cx);
-                    if !AppSettings::get(cx).tabs || active.is_blank() {
-                        this.replace_active(doc, window, cx);
+                    let replace = active.is_blank()
+                        || match placement {
+                            Placement::Default => !AppSettings::get(cx).tabs,
+                            Placement::NewTab => false,
+                            Placement::ReplaceActive => true,
+                        };
+                    if replace {
+                        this.replace_active(doc.clone(), window, cx);
                     } else {
-                        this.add_document(doc, true, window, cx);
+                        this.add_document(doc.clone(), true, window, cx);
+                    }
+                    if let Some(anchor) = anchor {
+                        this.reveal_anchor(&doc, &anchor, window, cx);
                     }
                 }
                 Err(err) => {
@@ -913,7 +947,12 @@ impl Workspace {
         match next {
             AfterConfirm::NewFile => self.new_document(window, cx),
             AfterConfirm::OpenDialog => self.prompt_open(window, cx),
-            AfterConfirm::OpenPath(path) => self.load_path(path, window, cx),
+            AfterConfirm::OpenPath(path) => {
+                self.load_path(path, Placement::Default, None, window, cx)
+            }
+            AfterConfirm::OpenLink(path, anchor) => {
+                self.load_path(path, Placement::ReplaceActive, anchor, window, cx)
+            }
             AfterConfirm::CloseDocument(id) => {
                 self.discarded.remove(&id);
                 self.remove_document(id, window, cx);
@@ -938,6 +977,107 @@ impl Workspace {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Links
+
+    /// Follow a link clicked in the active document's preview.
+    fn follow_link(&mut self, action: &FollowLink, window: &mut Window, cx: &mut Context<Self>) {
+        let doc = self.active_document().clone();
+        let base_dir = doc.read(cx).dir();
+        let Some(target) = links::classify(&action.url, base_dir.as_deref()) else {
+            return;
+        };
+        match target {
+            LinkTarget::Heading(anchor) => self.reveal_anchor(&doc, &anchor, window, cx),
+            LinkTarget::External(url) => {
+                if AppSettings::get(cx).confirm_web_links {
+                    confirm_external_link(url, window, cx);
+                } else {
+                    cx.open_url(&url);
+                }
+            }
+            LinkTarget::NeedsSavedDocument => self.notify_error(
+                "Save this document first, so Malgel knows where the files it links to are.",
+                window,
+                cx,
+            ),
+            LinkTarget::File { path, anchor } => {
+                if !path.exists() {
+                    // Name the file as the link does, where it can.
+                    let shown = base_dir
+                        .as_deref()
+                        .and_then(|dir| path.strip_prefix(dir).ok())
+                        .unwrap_or(&path);
+                    self.notify_error(format!("Couldn’t find “{}”.", shown.display()), window, cx);
+                } else if path.is_file() && is_markdown_path(&path) {
+                    let mut new_tab = AppSettings::get(cx).open_links_in == LinkPlacement::NewTab;
+                    if action.alternate {
+                        new_tab = !new_tab;
+                    }
+                    self.open_linked_document(path, anchor, new_tab, window, cx);
+                } else {
+                    confirm_open_file(path, window, cx);
+                }
+            }
+        }
+    }
+
+    /// Show a diagram of the active document in a window of its own.
+    fn view_diagram(&mut self, action: &ViewDiagram, _: &mut Window, cx: &mut Context<Self>) {
+        let name = self.active_document().read(cx).name();
+        diagram_viewer::open(&action.0, format!("Diagram — {name}"), cx);
+    }
+
+    /// Show the Markdown file `path` (in a new tab, or in place of the
+    /// active document), scrolled to `anchor`.
+    fn open_linked_document(
+        &mut self,
+        path: PathBuf,
+        anchor: Option<String>,
+        new_tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = path.canonicalize().unwrap_or(path);
+        if let Some(ix) = self
+            .documents
+            .iter()
+            .position(|doc| doc.read(cx).path() == Some(&path))
+        {
+            self.activate(ix, window, cx);
+            if let Some(anchor) = anchor {
+                let doc = self.documents[ix].clone();
+                self.reveal_anchor(&doc, &anchor, window, cx);
+            }
+            return;
+        }
+        if new_tab {
+            self.load_path(path, Placement::NewTab, anchor, window, cx);
+        } else {
+            self.confirm_unsaved(
+                self.active_document().clone(),
+                AfterConfirm::OpenLink(path, anchor),
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Scroll `doc` to the heading `anchor` names, once it is laid out.
+    fn reveal_anchor(
+        &mut self,
+        doc: &Entity<DocumentView>,
+        anchor: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = doc.clone();
+        let anchor = anchor.to_string();
+        window.defer(cx, move |window, cx| {
+            doc.update(cx, |doc, cx| doc.reveal_anchor(&anchor, window, cx));
+        });
+    }
+
     fn prompt_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -951,7 +1091,7 @@ impl Workspace {
             };
             _ = this.update_in(cx, |this, window, cx| {
                 for path in paths {
-                    this.load_path(path, window, cx);
+                    this.load_path(path, Placement::Default, None, window, cx);
                 }
             });
         })
@@ -1755,6 +1895,61 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
                     |settings, on| settings.line_numbers = on,
                     cx,
                 ))
+                .child(section("LINKS"))
+                .child(
+                    h_flex()
+                        .gap_4()
+                        .py_2()
+                        .justify_between()
+                        .child(
+                            v_flex()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Open linked documents in"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(if cfg!(target_os = "macos") {
+                                            "Command-click a link to do the opposite."
+                                        } else {
+                                            "Ctrl-click a link to do the opposite."
+                                        }),
+                                ),
+                        )
+                        .child(
+                            RadioGroup::horizontal("open-links-in")
+                                .flex_none()
+                                .child("A new tab")
+                                .child("The same tab")
+                                .selected_index(Some(match settings.open_links_in {
+                                    LinkPlacement::NewTab => 0,
+                                    LinkPlacement::SameTab => 1,
+                                }))
+                                .on_click(|ix, _, cx| {
+                                    let placement = if *ix == 0 {
+                                        LinkPlacement::NewTab
+                                    } else {
+                                        LinkPlacement::SameTab
+                                    };
+                                    AppSettings::update(cx, |settings| {
+                                        settings.open_links_in = placement
+                                    });
+                                }),
+                        ),
+                )
+                .child(row(
+                    "confirm-web-links",
+                    "Ask before opening web links",
+                    "Show where a link leads before it opens in your browser.",
+                    settings.confirm_web_links,
+                    |settings, on| settings.confirm_web_links = on,
+                    cx,
+                ))
                 .child(section("FILES"))
                 .child(default_app_row(default_status, cx)),
         )
@@ -1857,6 +2052,115 @@ pub fn open_about(window: &mut Window, cx: &mut App) {
                     ),
             )
             .ok_text("OK")
+    });
+}
+
+/// Ask before opening a web link (or an email address, or another app's
+/// link) outside Malgel, as a document's links can lead anywhere.
+fn confirm_external_link(url: String, window: &mut Window, cx: &mut App) {
+    if window.has_active_dialog(cx) {
+        return;
+    }
+    let web = url.starts_with("http://") || url.starts_with("https://");
+    let dont_ask = Rc::new(Cell::new(false));
+    window.open_alert_dialog(cx, move |alert, _, cx| {
+        let (url, open_url) = (url.clone(), url.clone());
+        let (checkbox, remember) = (dont_ask.clone(), dont_ask.clone());
+        alert
+            .title(if web {
+                "Open this link in your browser?"
+            } else {
+                "Open this link?"
+            })
+            .description(
+                v_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1p5()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().muted)
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_sm()
+                            .text_color(cx.theme().foreground)
+                            .child(url.chars().take(400).collect::<String>()),
+                    )
+                    .when(web, |this| {
+                        this.child(
+                            Checkbox::new("dont-ask")
+                                .label("Don’t ask again for web links")
+                                .checked(dont_ask.get())
+                                .on_click(move |checked, window, _| {
+                                    checkbox.set(*checked);
+                                    window.refresh();
+                                }),
+                        )
+                    }),
+            )
+            .footer(
+                DialogFooter::new()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel")
+                            .label("Cancel")
+                            .outline()
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("open")
+                            .label(if web { "Open in Browser" } else { "Open" })
+                            .primary()
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                if remember.get() {
+                                    AppSettings::update(cx, |settings| {
+                                        settings.confirm_web_links = false
+                                    });
+                                }
+                                cx.open_url(&open_url);
+                            }),
+                    ),
+            )
+    });
+}
+
+/// Ask before opening a linked file Malgel doesn't show itself (or a
+/// folder) with the app the system uses for it.
+fn confirm_open_file(path: PathBuf, window: &mut Window, cx: &mut App) {
+    if window.has_active_dialog(cx) {
+        return;
+    }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let folder = path.is_dir();
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let path = path.clone();
+        alert
+            .title(format!("Open “{name}”?"))
+            .description(if folder {
+                "The folder will open in your file manager."
+            } else {
+                "Malgel can’t show this file, so it will open in the app your system uses for it."
+            })
+            .footer(
+                DialogFooter::new()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel")
+                            .label("Cancel")
+                            .outline()
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(Button::new("open").label("Open").primary().on_click(
+                        move |_, window, cx| {
+                            window.close_dialog(cx);
+                            cx.open_with_system(&path);
+                        },
+                    )),
+            )
     });
 }
 
@@ -2005,6 +2309,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_file))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::open_recent))
+            .on_action(cx.listener(Self::follow_link))
+            .on_action(cx.listener(Self::view_diagram))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::save_as))

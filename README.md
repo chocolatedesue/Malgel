@@ -34,7 +34,16 @@ A fast, native Markdown editor and previewer written in pure Rust with
   [merman](https://github.com/Latias94/merman), with no browser or
   JavaScript. Diagrams take their colors from the current theme, render in
   the background in a few milliseconds, and a mistake shows the parser's
-  message under the source instead of a blank.
+  message under the source instead of a blank. Click a diagram to open it in
+  a window of its own: scroll or pinch to zoom, drag to move around,
+  double-click to zoom in, and 0 to fit it to the window. Zoomed in, the part
+  in view is drawn again at that size, so even small labels stay crisp.
+- **Links that go somewhere.** Click a link in the preview to follow it. Links
+  to headings (`#getting-started`) scroll to them; links to other Markdown
+  files open them in Malgel, at the heading they name, in a new tab or in
+  place of the current document (a setting; Ctrl-click does the other).
+  Web links open in your browser after showing where they lead, and other
+  files open in their own apps once you agree.
 - **Formatting commands.** Bold, italic, strikethrough, inline code, links,
   headings, quotes, bulleted/numbered/task lists and code blocks — each
   toggles, and works on the selection or the word under the caret.
@@ -248,6 +257,8 @@ dictionaries and on macOS those in `~/Library/Spelling` are found too.
 | `src/preview_ext.rs` | Preview plugins: GitHub alerts, block and inline math, Mermaid diagrams |
 | `src/math.rs` | LaTeX → Typst → SVG/PNG formula rendering |
 | `src/diagram.rs` | Mermaid diagrams, themed, as SVG any renderer can draw |
+| `src/diagram_viewer.rs` | The window that shows a diagram larger, to zoom and move around |
+| `src/links.rs` | Where links in the preview lead: headings, documents, files, the web |
 | `src/menus.rs`, `src/actions.rs` | Menus, actions and key bindings |
 | `src/settings.rs`, `src/themes.rs` | Preferences and theme application |
 | `build.rs`, `packaging/` | Windows exe icon and version info; app icon, bundles and installers |

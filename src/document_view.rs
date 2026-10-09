@@ -107,6 +107,8 @@ pub struct DocumentView {
     revision: usize,
     analysis: Arc<Analysis>,
     analysis_task: Option<Task<()>>,
+    /// A heading to show once the outline is known, from following a link.
+    pending_anchor: Option<String>,
 
     recovery_id: String,
     recovery_written: bool,
@@ -205,6 +207,7 @@ impl DocumentView {
             revision: 0,
             analysis: Arc::default(),
             analysis_task: None,
+            pending_anchor: None,
             recovery_id: session::new_recovery_id(),
             recovery_written: false,
             recovery_task: None,
@@ -887,6 +890,20 @@ impl DocumentView {
     // ---------------------------------------------------------------------
     // Navigation
 
+    /// Show the heading a link's `#anchor` names, once the outline is known.
+    pub fn reveal_anchor(&mut self, anchor: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.analysis_task.is_some() {
+            self.pending_anchor = Some(anchor.to_string());
+            return;
+        }
+        match crate::links::find_heading(&self.analysis.outline, anchor) {
+            Some(ix) => self.reveal_heading(ix, window, cx),
+            None => cx.emit(DocumentEvent::Notify(
+                format!("“{}” has no heading “#{anchor}”.", self.name()).into(),
+            )),
+        }
+    }
+
     pub fn reveal_heading(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(heading) = self.analysis.outline.get(ix).cloned() else {
             return;
@@ -1251,11 +1268,7 @@ impl DocumentView {
                     .code_block_actions(|code_block, _, _| {
                         Clipboard::new("copy-code").value(code_block.code())
                     })
-                    .on_link_click(|url, event, _, cx| {
-                        if !event.is_right_click() {
-                            cx.open_url(url);
-                        }
-                    }),
+                    .on_link_click(crate::links::on_click),
             )
             .when(is_empty, |this| {
                 this.child(
@@ -1304,6 +1317,14 @@ impl DocumentView {
 
 impl Render for DocumentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.analysis_task.is_none()
+            && let Some(anchor) = self.pending_anchor.take()
+        {
+            let document = cx.entity();
+            window.defer(cx, move |window, cx| {
+                document.update(cx, |this, cx| this.reveal_anchor(&anchor, window, cx));
+            });
+        }
         let settings = AppSettings::get(cx);
         let layout = if settings.focus_mode {
             Layout::Editor

@@ -9,6 +9,17 @@ pub const DEFAULT_FONT_SIZE: f32 = 16.;
 pub const MIN_FONT_SIZE: f32 = 12.;
 pub const MAX_FONT_SIZE: f32 = 24.;
 
+/// Where a document opened from a link in the preview goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkPlacement {
+    /// A tab of its own, keeping the linking document open.
+    #[default]
+    NewTab,
+    /// In place of the linking document, like a browser.
+    SameTab,
+}
+
 /// Light or dark appearance, or follow the system.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +80,10 @@ pub struct Settings {
     /// Folder, next to the document, that pasted and dropped images are
     /// saved into.
     pub image_folder: String,
+    /// Where documents opened from links go.
+    pub open_links_in: LinkPlacement,
+    /// Ask before opening a web link in the browser.
+    pub confirm_web_links: bool,
 
     /// Hide everything but the text, dimming all but the current paragraph.
     /// Lasts until turned off or Malgel quits.
@@ -95,6 +110,8 @@ impl Default for Settings {
             spell_language: None,
             restore_session: true,
             image_folder: "assets".to_string(),
+            open_links_in: LinkPlacement::NewTab,
+            confirm_web_links: true,
             focus_mode: false,
         }
     }
@@ -193,6 +210,8 @@ mod tests {
         // Optional features start off; session restore starts on.
         assert!(!settings.tabs && !settings.file_sidebar && !settings.spell_check);
         assert!(settings.restore_session);
+        assert_eq!(settings.open_links_in, LinkPlacement::NewTab);
+        assert!(settings.confirm_web_links);
     }
 
     #[test]

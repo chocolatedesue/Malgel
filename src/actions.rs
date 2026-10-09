@@ -102,6 +102,20 @@ pub struct ReplaceMisspelling {
     pub with: SharedString,
 }
 
+/// Follow a link clicked in the preview. `alternate` opens a linked
+/// document the other way from the setting (a new tab or the same one).
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = malgel, no_json)]
+pub struct FollowLink {
+    pub url: SharedString,
+    pub alternate: bool,
+}
+
+/// Show the Mermaid diagram with this source in its own window.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = malgel, no_json)]
+pub struct ViewDiagram(pub SharedString);
+
 /// Accept a word as correctly spelled from now on.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = malgel, no_json)]

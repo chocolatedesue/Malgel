@@ -7,6 +7,7 @@ mod actions;
 mod analysis;
 mod default_app;
 mod diagram;
+mod diagram_viewer;
 mod document;
 mod document_view;
 mod docx;
@@ -14,6 +15,7 @@ mod export;
 mod file_tree;
 mod format;
 mod images;
+mod links;
 mod math;
 mod menus;
 mod pdf;
@@ -82,6 +84,7 @@ fn main() {
         themes::init(Settings::load(), cx);
         // Bind keys before building menus so the menus show the shortcuts.
         actions::bind_keys(cx);
+        diagram_viewer::bind_keys(cx);
         let app_menu_bar = menus::init(cx);
 
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
@@ -96,8 +99,15 @@ fn main() {
 
         // Malgel is a single-window app: closing the window ends it on
         // every platform, as the menu offers no way to open a new one.
+        // Diagram windows belong to it and close with it.
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
+            let main_open = cx.try_global::<MainWindow>().is_some_and(|main| {
+                cx.windows()
+                    .iter()
+                    .any(|window| window.window_id() == main.handle.window_id())
+            });
+            if !main_open {
+                diagram_viewer::close_all(cx);
                 cx.quit();
             }
         })
@@ -179,9 +189,13 @@ fn open_window(
     }
 }
 
+/// Run `f` in the main window, where dialogs like Settings belong.
 fn with_window(cx: &mut App, f: impl FnOnce(&mut gpui_kit::Window, &mut App)) {
     let Some(window) = cx
-        .active_window()
+        .try_global::<MainWindow>()
+        .map(|main| main.handle)
+        .filter(|main| cx.windows().contains(main))
+        .or_else(|| cx.active_window())
         .or_else(|| cx.windows().into_iter().next())
     else {
         return;
