@@ -15,7 +15,9 @@ use gpui_kit::{
     component::{
         ActiveTheme as _, Icon, Sizable as _,
         button::Button,
+        clipboard::Clipboard,
         h_flex,
+        tab::{Tab, TabBar},
         text::{
             InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode,
             MarkdownParseContext, MarkdownPlugin, markdown_ast::Node,
@@ -38,6 +40,7 @@ use crate::{
 pub fn markdown_extensions(preview: &gpui_kit::Entity<TextViewState>) -> MarkdownExtensions {
     let cache = MathCache::new(preview);
     let diagrams = DiagramCache::new(preview);
+    let tabs_state = TabsState::new(preview);
     let with_math = |extensions: MarkdownExtensions| {
         extensions
             .plugin(BlockMathPlugin {
@@ -54,11 +57,18 @@ pub fn markdown_extensions(preview: &gpui_kit::Entity<TextViewState>) -> Markdow
     let alert = AlertPlugin {
         body_extensions: with_math(MarkdownExtensions::default()),
     };
+    let tabs = TabsPlugin {
+        content_extensions: with_math(
+            MarkdownExtensions::default().plugin(alert.clone()),
+        ),
+        state: tabs_state,
+    };
     with_math(
         MarkdownExtensions::default()
             .frontmatter()
             .plugin(gpui_kit::component::text::FrontmatterPlugin::new())
-            .plugin(alert),
+            .plugin(alert)
+            .plugin(tabs),
     )
 }
 
@@ -143,6 +153,7 @@ pub fn parse_alert(blockquote_source: &str) -> Option<(AlertKind, String)> {
     Some((kind, body.trim().to_string()))
 }
 
+#[derive(Clone)]
 struct AlertPlugin {
     body_extensions: MarkdownExtensions,
 }
@@ -205,6 +216,396 @@ impl MarkdownPlugin for AlertPlugin {
                         .w_full(),
                 )
             })
+    }
+}
+
+// -------------------------------------------------------------------------
+// Multi-tab content blocks
+
+/// A single tab item within a multi-tab block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabItem {
+    pub title: SharedString,
+    pub content: SharedString,
+}
+
+/// Parsed tabs block data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabsData {
+    pub tabs: Vec<TabItem>,
+    pub default_index: usize,
+    pub source: SharedString,
+}
+
+/// Tracks the selected tab for each tab block in the preview.
+#[derive(Clone)]
+pub struct TabsState {
+    active_tabs: Arc<Mutex<HashMap<u64, usize>>>,
+    preview: WeakEntity<TextViewState>,
+}
+
+impl TabsState {
+    pub fn new(preview: &gpui_kit::Entity<TextViewState>) -> Self {
+        Self {
+            active_tabs: Arc::default(),
+            preview: preview.downgrade(),
+        }
+    }
+
+    pub fn get_active(&self, block_id: u64, default_index: usize, count: usize) -> usize {
+        let tabs = self.active_tabs.lock().expect("tabs state poisoned");
+        match tabs.get(&block_id) {
+            Some(&idx) if idx < count => idx,
+            _ => default_index.min(count.saturating_sub(1)),
+        }
+    }
+
+    pub fn set_active(&self, block_id: u64, index: usize, cx: &mut App) {
+        self.active_tabs
+            .lock()
+            .expect("tabs state poisoned")
+            .insert(block_id, index);
+        _ = self.preview.update(cx, |preview, cx| {
+            preview.invalidate_inline_layout(cx);
+        });
+    }
+}
+
+/// Parse a tab header delimiter line.
+///
+/// Returns `Some((title, is_default))` if the line is a valid tab header.
+/// Supported markers:
+/// - `=== "Title"` or `=== Title` (with optional `!` for default tab: `===! "Title"`)
+/// - `== "Title"` or `== Title` (with optional `!` for default tab: `==! "Title"`)
+/// - `@tab "Title"` or `@tab Title` (with optional `!` for default tab: `@tab! "Title"`)
+/// - `:::tab "Title"` or `:::tab Title` (with optional `!` for default tab: `:::tab! "Title"`)
+/// - `--- "Title"` or `--- Tab: Title`
+pub fn parse_tab_header(line: &str) -> Option<(&str, bool)> {
+    let trimmed = line.trim();
+    let (rest, default) = if let Some(after) = trimmed.strip_prefix("===") {
+        if let Some(after_bang) = after.strip_prefix('!') {
+            (after_bang, true)
+        } else {
+            (after, false)
+        }
+    } else if let Some(after) = trimmed.strip_prefix("==") {
+        if let Some(after_bang) = after.strip_prefix('!') {
+            (after_bang, true)
+        } else {
+            (after, false)
+        }
+    } else if let Some(after) = trimmed.strip_prefix("@tab") {
+        if let Some(after_bang) = after.strip_prefix('!') {
+            (after_bang, true)
+        } else {
+            (after, false)
+        }
+    } else if let Some(after) = trimmed.strip_prefix(":::tab") {
+        if let Some(after_bang) = after.strip_prefix('!') {
+            (after_bang, true)
+        } else {
+            (after, false)
+        }
+    } else if let Some(after) = trimmed.strip_prefix("---") {
+        let after = after.trim_start();
+        if after.is_empty() {
+            return None;
+        }
+        let after = after
+            .strip_prefix("tab:")
+            .or_else(|| after.strip_prefix("Tab:"))
+            .unwrap_or(after);
+        (after, false)
+    } else {
+        return None;
+    };
+
+    let title = rest.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    // Strip surrounding quotes if present: "Title" or 'Title'
+    let title = if (title.starts_with('"') && title.ends_with('"') && title.len() >= 2)
+        || (title.starts_with('\'') && title.ends_with('\'') && title.len() >= 2)
+    {
+        &title[1..title.len() - 1]
+    } else {
+        title
+    };
+
+    let title = title.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    Some((title, default))
+}
+
+/// Strip common indentation across lines (e.g. 4-space indent in MkDocs tab content).
+fn dedent_lines(lines: &[&str]) -> String {
+    let min_indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().take_while(|c| *c == ' ' || *c == '\t').count())
+        .min()
+        .unwrap_or(0);
+
+    let mut result = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.trim().is_empty() {
+            result.push("");
+        } else if min_indent > 0 {
+            let mut char_count = 0;
+            let mut byte_idx = line.len();
+            for (idx, _) in line.char_indices() {
+                if char_count == min_indent {
+                    byte_idx = idx;
+                    break;
+                }
+                char_count += 1;
+            }
+            result.push(&line[byte_idx..]);
+        } else {
+            result.push(*line);
+        }
+    }
+
+    result.join("\n").trim().to_string()
+}
+
+/// Parse the body containing tab headers and panel contents.
+pub fn parse_tabs_body(body: &str) -> Option<(Vec<TabItem>, usize)> {
+    let mut tabs = Vec::new();
+    let mut default_index = None;
+    let mut current_title: Option<String> = None;
+    let mut current_lines: Vec<&str> = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        // Ignore container closing marker
+        if trimmed == ":::" {
+            continue;
+        }
+
+        if let Some((title, is_default)) = parse_tab_header(line) {
+            if let Some(prev_title) = current_title.take() {
+                let content = dedent_lines(&current_lines);
+                tabs.push(TabItem {
+                    title: prev_title.into(),
+                    content: content.into(),
+                });
+                current_lines.clear();
+            }
+            if is_default && default_index.is_none() {
+                default_index = Some(tabs.len());
+            }
+            current_title = Some(title.to_string());
+        } else if current_title.is_some() {
+            current_lines.push(line);
+        }
+    }
+
+    if let Some(prev_title) = current_title {
+        let content = dedent_lines(&current_lines);
+        tabs.push(TabItem {
+            title: prev_title.into(),
+            content: content.into(),
+        });
+    }
+
+    if tabs.is_empty() {
+        None
+    } else {
+        let def_idx = default_index.unwrap_or(0);
+        Some((tabs, def_idx))
+    }
+}
+
+/// Parse a container block starting with `:::tabs` or `:::tab`.
+pub fn parse_tabs_container(source: &str) -> Option<(Vec<TabItem>, usize)> {
+    let trimmed = source.trim();
+    let body = if let Some(after) = trimmed.strip_prefix(":::tabs") {
+        after
+    } else if let Some(after) = trimmed.strip_prefix(":::tab") {
+        after
+    } else if let Some(after) = trimmed.strip_prefix(":::tabbed") {
+        after
+    } else {
+        return None;
+    };
+    parse_tabs_body(body)
+}
+
+/// Parse blockquotes containing tabs e.g. `> [!tabs]` or `> :::tabs`.
+pub fn parse_tabs_blockquote(source: &str) -> Option<(Vec<TabItem>, usize)> {
+    let mut unquoted = Vec::new();
+    for line in source.lines() {
+        let line = line.trim_start();
+        let stripped = match line.strip_prefix('>') {
+            Some(rest) => rest.strip_prefix(' ').unwrap_or(rest),
+            None => line,
+        };
+        unquoted.push(stripped);
+    }
+    let body = unquoted.join("\n");
+    let trimmed = body.trim();
+    if let Some(after) = trimmed.strip_prefix("[!tabs]") {
+        parse_tabs_body(after)
+    } else if let Some(after) = trimmed.strip_prefix("[!tab]") {
+        parse_tabs_body(after)
+    } else if trimmed.starts_with(":::tabs") || trimmed.starts_with(":::tab") {
+        parse_tabs_container(trimmed)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone)]
+pub struct TabsPlugin {
+    content_extensions: MarkdownExtensions,
+    state: TabsState,
+}
+
+impl MarkdownPlugin for TabsPlugin {
+    fn is_block(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &str {
+        "tabs"
+    }
+
+    fn parse(&self, node: &Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+        match node {
+            Node::Code(code) => {
+                let lang = code
+                    .lang
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                if lang == "tabs"
+                    || lang == "tab"
+                    || lang == "tabbed"
+                    || lang.starts_with("tabs:")
+                    || lang.starts_with("tab:")
+                {
+                    let (tabs, default_index) = parse_tabs_body(&code.value)?;
+                    let source = cx.node_source(node).unwrap_or(&code.value);
+                    Some(
+                        MarkdownNode::new(
+                            "tabs",
+                            TabsData {
+                                tabs,
+                                default_index,
+                                source: source.to_string().into(),
+                            },
+                        )
+                        .accessibility_label("Tabbed content")
+                        .markdown(source.to_string()),
+                    )
+                } else {
+                    None
+                }
+            }
+            Node::Blockquote(_) => {
+                let source = cx.node_source(node)?;
+                let (tabs, default_index) = parse_tabs_blockquote(source)?;
+                Some(
+                    MarkdownNode::new(
+                        "tabs",
+                        TabsData {
+                            tabs,
+                            default_index,
+                            source: source.to_string().into(),
+                        },
+                    )
+                    .accessibility_label("Tabbed content")
+                    .markdown(source.to_string()),
+                )
+            }
+            Node::Paragraph(_) | Node::Html(_) => {
+                let source = cx.node_source(node)?;
+                let (tabs, default_index) = parse_tabs_container(source)?;
+                Some(
+                    MarkdownNode::new(
+                        "tabs",
+                        TabsData {
+                            tabs,
+                            default_index,
+                            source: source.to_string().into(),
+                        },
+                    )
+                    .accessibility_label("Tabbed content")
+                    .markdown(source.to_string()),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn render(&self, node: &MarkdownNode, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let data = node.data::<TabsData>().expect("tabs node data");
+        let block_id = content_hash(&data.source);
+        let active_index = self
+            .state
+            .get_active(block_id, data.default_index, data.tabs.len());
+
+        let theme = cx.theme();
+        let border_color = theme.border;
+        let card_bg = theme.background;
+        let header_bg = theme.muted.opacity(0.35);
+
+        let active_tab = &data.tabs[active_index];
+        let content_id = SharedString::from(format!("tab-body-{block_id}-{active_index}"));
+
+        let state = self.state.clone();
+        let copy_button = Clipboard::new(SharedString::from(format!("tab-copy-{block_id}")))
+            .value(active_tab.content.clone())
+            .tooltip("Copy tab content");
+
+        let tab_bar = TabBar::new(SharedString::from(format!("tab-bar-{block_id}")))
+            .underline()
+            .selected_index(active_index)
+            .children(data.tabs.iter().map(|tab| Tab::new().label(tab.title.clone())))
+            .suffix(copy_button)
+            .on_click(move |&new_idx, _window, cx| {
+                state.set_active(block_id, new_idx, cx);
+            });
+
+        v_flex()
+            .id(SharedString::from(format!("tabs-{block_id}")))
+            .w_full()
+            .my_3()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(border_color)
+            .bg(card_bg)
+            .overflow_hidden()
+            .child(
+                div()
+                    .w_full()
+                    .bg(header_bg)
+                    .border_b_1()
+                    .border_color(border_color)
+                    .px_2()
+                    .child(tab_bar),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .px_4()
+                    .py_3()
+                    .when(!active_tab.content.is_empty(), |this| {
+                        this.child(
+                            TextView::markdown(content_id, active_tab.content.clone())
+                                .markdown_extensions(self.content_extensions.clone())
+                                .on_link_click(crate::links::on_click)
+                                .w_full(),
+                        )
+                    }),
+            )
     }
 }
 
@@ -791,5 +1192,66 @@ mod tests {
         assert_eq!(hex_over(black, white), "#000000");
         assert_eq!(hex_over(black.opacity(0.5), white), "#808080");
         assert_eq!(hex_over(gpui_kit::rgb(0x0969da).into(), black), "#0969da");
+    }
+
+    #[test]
+    fn parses_tabs_from_code_block() {
+        let body = r#"=== "Rust"
+fn main() {
+    println!("Hello, World!");
+}
+
+===! "Python"
+print("Hello, World!")
+
+=== "Go"
+fmt.Println("Hello, World!")
+"#;
+        let (tabs, default_index) = parse_tabs_body(body).unwrap();
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs[0].title.as_ref(), "Rust");
+        assert!(tabs[0].content.as_ref().contains("println!"));
+        assert_eq!(tabs[1].title.as_ref(), "Python");
+        assert!(tabs[1].content.as_ref().contains("print("));
+        assert_eq!(tabs[2].title.as_ref(), "Go");
+        assert_eq!(default_index, 1);
+    }
+
+    #[test]
+    fn parses_tabs_container_syntax() {
+        let container = r#":::tabs
+@tab Tab 1
+Content 1
+@tab Tab 2
+Content 2
+:::
+"#;
+        let (tabs, default_index) = parse_tabs_container(container).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].title.as_ref(), "Tab 1");
+        assert_eq!(tabs[0].content.as_ref(), "Content 1");
+        assert_eq!(tabs[1].title.as_ref(), "Tab 2");
+        assert_eq!(tabs[1].content.as_ref(), "Content 2");
+        assert_eq!(default_index, 0);
+    }
+
+    #[test]
+    fn parses_tabs_blockquote_syntax() {
+        let bq = "> [!tabs]\n> === \"First\"\n> Hello\n> === \"Second\"\n> World";
+        let (tabs, default_index) = parse_tabs_blockquote(bq).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].title.as_ref(), "First");
+        assert_eq!(tabs[0].content.as_ref(), "Hello");
+        assert_eq!(tabs[1].title.as_ref(), "Second");
+        assert_eq!(tabs[1].content.as_ref(), "World");
+        assert_eq!(default_index, 0);
+    }
+
+    #[test]
+    fn dedents_tab_content() {
+        let body = "=== \"Indented\"\n    line 1\n    line 2\n=== \"Normal\"\nline 3";
+        let (tabs, _) = parse_tabs_body(body).unwrap();
+        assert_eq!(tabs[0].content.as_ref(), "line 1\nline 2");
+        assert_eq!(tabs[1].content.as_ref(), "line 3");
     }
 }

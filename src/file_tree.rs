@@ -361,7 +361,7 @@ fn list(folder: &Path) -> Option<Vec<Entry>> {
             let keep = if is_dir {
                 !SKIPPED_FOLDERS.contains(&name.as_str())
             } else {
-                is_markdown_path(&path)
+                is_markdown_path(&path) || crate::document::is_pdf_path(&path)
             };
             keep.then_some(Entry { name, path, is_dir })
         })

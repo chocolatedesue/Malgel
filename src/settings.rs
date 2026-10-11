@@ -103,7 +103,7 @@ impl Default for Settings {
             line_numbers: true,
             scroll_sync: true,
             recent_files: Vec::new(),
-            tabs: false,
+            tabs: true,
             file_sidebar: false,
             outline_sidebar: false,
             spell_check: false,
@@ -207,8 +207,8 @@ mod tests {
         assert_eq!(settings.layout, Layout::Preview);
         assert!(settings.soft_wrap);
         assert_eq!(settings.font_size, DEFAULT_FONT_SIZE);
-        // Optional features start off; session restore starts on.
-        assert!(!settings.tabs && !settings.file_sidebar && !settings.spell_check);
+        // Tabs and session restore start on; other optional features start off.
+        assert!(settings.tabs && !settings.file_sidebar && !settings.spell_check);
         assert!(settings.restore_session);
         assert_eq!(settings.open_links_in, LinkPlacement::NewTab);
         assert!(settings.confirm_web_links);

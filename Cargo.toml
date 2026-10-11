@@ -87,6 +87,9 @@ typst-pdf = "0.15.1"
 typst-render = "0.15.1"
 typst-svg = "0.15.1"
 serde_json = "1"
+# Native PDF viewing support
+hayro = "0.7.1"
+hayro-svg = "0.7.0"
 
 # "Default app for Markdown" in Settings.
 [target.'cfg(target_os = "macos")'.dependencies]
