@@ -77,6 +77,14 @@ main:
         AWS_LC_SYS_PREBUILT_NASM: "1"
         XWIN_ARCH: x86_64
       stages:
+        - name: rust-toolchain
+          # The cargo-xwin image tracks an older rustc (1.89) than the
+          # dependency tree requires (typst 0.15 needs >= 1.92).
+          script: |
+            rustup update stable
+            rustup default stable
+            rustup target add x86_64-pc-windows-msvc
+            rustc --version
         - name: cargo-mirror
           script: mkdir -p .cargo && printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n' > .cargo/config.toml
         - name: build
