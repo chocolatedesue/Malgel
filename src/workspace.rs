@@ -133,7 +133,7 @@ impl Workspace {
     ) -> Self {
         let settings = AppSettings::get(cx).clone();
         let headings = cx.new(|cx| CommandState::new(window, cx));
-        let file_tree = cx.new(|_| FileTree::new());
+        let file_tree = cx.new(|cx| FileTree::new(cx));
 
         let subscriptions = vec![
             cx.subscribe_in(

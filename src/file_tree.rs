@@ -30,6 +30,9 @@ use crate::actions::OpenFolder;
 
 /// Folders never worth showing: tool caches and dependencies.
 
+/// Entries hidden by default, matching VS Code's `files.exclude`.
+const DEFAULT_EXCLUDED: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     name: String,
@@ -53,6 +56,8 @@ pub struct FileTree {
     rows: Vec<Row>,
     /// The file the workspace is showing.
     active: Option<PathBuf>,
+    /// Whether dotfiles and the default-excluded entries are listed.
+    show_hidden: bool,
     scroll: UniformListScrollHandle,
     refresh_task: Option<Task<()>>,
 }
@@ -60,8 +65,8 @@ pub struct FileTree {
 impl EventEmitter<FileTreeEvent> for FileTree {}
 
 impl FileTree {
-    pub fn new() -> Self {
-        Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let mut this = Self {
             root: None,
             expanded: HashSet::new(),
             listings: HashMap::new(),
@@ -69,7 +74,22 @@ impl FileTree {
             active: None,
             scroll: UniformListScrollHandle::new(),
             refresh_task: None,
+            show_hidden: crate::themes::AppSettings::get(cx).show_hidden_entries,
+        };
+        cx.observe_global::<crate::themes::AppSettings>(|this, cx| {
+            this.set_show_hidden(crate::themes::AppSettings::get(cx).show_hidden_entries, cx);
+        })
+        .detach();
+        this
+    }
+
+    /// Apply the "show hidden entries" setting and re-list.
+    pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.show_hidden == show {
+            return;
         }
+        self.show_hidden = show;
+        self.refresh(cx);
     }
 
     pub fn root(&self) -> Option<&Path> {
@@ -131,10 +151,13 @@ impl FileTree {
             .filter(|folder| folder.starts_with(&root))
             .cloned()
             .collect();
+        let show_hidden = self.show_hidden;
         let listing = cx.background_executor().spawn(async move {
             folders
                 .into_iter()
-                .filter_map(|folder| list(&folder).map(|entries| (folder, entries)))
+                .filter_map(|folder| {
+                    list(&folder, show_hidden).map(|entries| (folder, entries))
+                })
                 .collect::<HashMap<_, _>>()
         });
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
@@ -345,7 +368,7 @@ impl Render for FileTree {
 }
 
 /// A folder's subfolders and Markdown files, folders first, by name.
-fn list(folder: &Path) -> Option<Vec<Entry>> {
+fn list(folder: &Path, show_hidden: bool) -> Option<Vec<Entry>> {
     let mut entries: Vec<Entry> = std::fs::read_dir(folder)
         .ok()?
         .flatten()
@@ -354,9 +377,10 @@ fn list(folder: &Path) -> Option<Vec<Entry>> {
             let path = item.path();
             // Follow links, so linked folders and files show as what they point to.
             let is_dir = path.is_dir();
-            // Show everything, the way VS Code does: dotfiles, every
-            // extension, dependency folders. Nothing is filtered here.
-            Some(Entry { name, path, is_dir })
+            // VS Code's default excluded entries stay hidden until
+            // "show hidden entries" is turned on; everything else shows.
+            let excluded = !show_hidden && DEFAULT_EXCLUDED.contains(&name.as_str());
+            (!excluded).then_some(Entry { name, path, is_dir })
         })
         .collect();
     entries.sort_by(|a, b| {
@@ -387,11 +411,11 @@ mod tests {
         ] {
             std::fs::write(dir.join(file), "").unwrap();
         }
-        let names: Vec<String> = list(&dir).unwrap().into_iter().map(|e| e.name).collect();
+        let names: Vec<String> =
+            list(&dir, false).unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(
             names,
             [
-                ".git",
                 "b-notes",
                 "node_modules",
                 ".hidden.md",
@@ -401,6 +425,9 @@ mod tests {
                 "Zed.md"
             ]
         );
+        let all: Vec<String> =
+            list(&dir, true).unwrap().into_iter().map(|e| e.name).collect();
+        assert!(all.contains(&".git".to_string()));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

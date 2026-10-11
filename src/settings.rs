@@ -84,6 +84,8 @@ pub struct Settings {
     pub open_links_in: LinkPlacement,
     /// Ask before opening a web link in the browser.
     pub confirm_web_links: bool,
+    /// Show .git and the other entries VS Code hides by default.
+    pub show_hidden_entries: bool,
 
     /// Hide everything but the text, dimming all but the current paragraph.
     /// Lasts until turned off or Malgel quits.
@@ -104,6 +106,7 @@ impl Default for Settings {
             scroll_sync: true,
             recent_files: Vec::new(),
             tabs: true,
+            show_hidden_entries: false,
             file_sidebar: false,
             outline_sidebar: false,
             spell_check: false,
