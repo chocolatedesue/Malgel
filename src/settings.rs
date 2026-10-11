@@ -84,6 +84,9 @@ pub struct Settings {
     pub open_links_in: LinkPlacement,
     /// Ask before opening a web link in the browser.
     pub confirm_web_links: bool,
+    /// Ask before the file tree moves a dragged entry (VS Code's
+    /// `explorer.confirmDragAndDrop`).
+    pub confirm_drag_and_drop: bool,
     /// Show .git and the other entries VS Code hides by default.
     pub show_hidden_entries: bool,
 
@@ -115,6 +118,7 @@ impl Default for Settings {
             image_folder: "assets".to_string(),
             open_links_in: LinkPlacement::NewTab,
             confirm_web_links: true,
+            confirm_drag_and_drop: true,
             focus_mode: false,
         }
     }
