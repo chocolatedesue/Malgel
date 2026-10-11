@@ -122,12 +122,17 @@ same setup:
   Native builds don't hit this; that's why it is not part of the branch.
 - CI pipelines (CNB, GitHub Actions matrix) — personal infrastructure.
 
-## Known issue not fixed yet
+## Known issue, partially fixed
 
-- **PDF page offset**: the PDF view renders correctly but its document
-  pane can be wider than the window (toolbar right edge and page edge
-  extend past the visible area). Diagnosis: pane width overflow in the
-  workspace layout for PDF-backed views; fix pending.
+- **PDF page offset**: the PDF page can render right-shifted instead of
+  centered on HiDPI/maximized windows. Two mitigations shipped: the
+  document panel is now a flexible slot (no more width computed from
+  viewport minus an assumed sidebar), and the pages container scrolls
+  both axes with the page card capped to the pane width, so all content
+  stays reachable. The centering offset itself still needs a live
+  gpui-layout debugging session; the suspicious area is the
+  resizable-panel sizing in Workspace render, and how viewport_size()
+  interacts with HiDPI/maximized windows.
 
 ## 7. Open Recent (LRU, Ctrl+R)
 
