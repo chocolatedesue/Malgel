@@ -2644,6 +2644,14 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
                     |settings, on| settings.confirm_web_links = on,
                     cx,
                 ))
+                .child(row(
+                    "confirm-drag-and-drop",
+                    "Ask before moving files dragged in the sidebar",
+                    "Confirm where a dragged file lands before it moves; holding Ctrl (Option on macOS) copies instead.",
+                    settings.confirm_drag_and_drop,
+                    |settings, on| settings.confirm_drag_and_drop = on,
+                    cx,
+                ))
                 .child(section("FILES"))
                 .child(default_app_row(default_status, cx)),
         )
@@ -3166,9 +3174,10 @@ impl Render for Workspace {
             .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().drop_target))
             // A tree entry dropped outside the file tree opens (files) the
             // way dropping it in VS Code's editor area does; dropping it on
-            // a tree folder is handled by the tree itself.
+            // a tree folder is handled by the tree itself. The highlight
+            // sits on the content area below, not the whole window, the way
+            // VS Code highlights the editor group only.
             .on_drop(cx.listener(Self::on_drop_tree_drag))
-            .drag_over::<TreeDrag>(|style, _, _, cx| style.bg(cx.theme().drop_target))
             // While a tab drags, clear the insertion line whenever the
             // pointer leaves the tab bar; the bar re-sets its bounds and
             // the hovered tab re-sets the line after this (capture order).
@@ -3182,7 +3191,14 @@ impl Render for Workspace {
                 }
             }))
             .child(self.render_title_bar(cx))
-            .child(div().flex_1().min_h_0().overflow_hidden().child(main))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .drag_over::<TreeDrag>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+                    .child(main),
+            )
             .when(!focus_mode, |this| this.child(self.render_status_bar(cx)))
     }
 }
