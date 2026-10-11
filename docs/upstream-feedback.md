@@ -122,6 +122,40 @@ same setup:
   Native builds don't hit this; that's why it is not part of the branch.
 - CI pipelines (CNB, GitHub Actions matrix) — personal infrastructure.
 
+## 8. Sidebar shows every file; drop routing by type
+
+- The sidebar filtered to markdown/pdf files, skipped dotfiles and
+  dependency folders (node_modules, target, venv, ...). It lists
+  everything now, the way VS Code does: any extension, dotfiles
+  included. Clicking a text file opens it as a document, a PDF opens
+  the PDF viewer.
+- Dropping external paths only recognized markdown: PDFs, plain text
+  and code files fell into the image-insert path or errored. Drops are
+  routed by type now: folders open as the sidebar root, openable files
+  open as documents, and only real images keep the legacy
+  insert-into-source behavior. (Dropping onto a specific tree folder
+  with move/copy semantics is a planned follow-up.)
+
+## Exploration: extension subset (wasm renderers)
+
+Reference point: embedpdf/embed-pdf-viewer ships a full PDF viewer as a
+reusable WASM component for web hosts. A native gpui app cannot embed a
+web-assembly UI toolkit directly, but a VS Code-style plugin subset is
+reachable in phases:
+
+1. **Renderer registry (no wasm)**: extract DocumentView's dispatch
+   (markdown today, PDF since this branch) into a DocumentRenderer
+   trait - `open(path) -> Option<Box<dyn Render>>` keyed by
+   extension/probe. The PDF viewer is already the first instance of
+   this pattern; making it a registry is the plugin point for custom
+   document types.
+2. **WASM data plugins**: host `wasmtime` WASI modules with a narrow
+   API (text/bytes in -> SVG or HTML-like fragment out) for custom
+   block renderers - diagrams, domain formats, table transforms. This
+   mirrors how embedpdf packages viewer logic as a wasm component.
+3. **Full UI extensions**: needs a webview/compositing surface in gpui
+   (or an exported component model) - blocked on gpui itself today.
+
 ## Known issue, partially fixed
 
 - **PDF page offset**: the PDF page can render right-shifted instead of
