@@ -58,9 +58,7 @@ pub fn markdown_extensions(preview: &gpui_kit::Entity<TextViewState>) -> Markdow
         body_extensions: with_math(MarkdownExtensions::default()),
     };
     let tabs = TabsPlugin {
-        content_extensions: with_math(
-            MarkdownExtensions::default().plugin(alert.clone()),
-        ),
+        content_extensions: with_math(MarkdownExtensions::default().plugin(alert.clone())),
         state: tabs_state,
     };
     with_math(
@@ -568,7 +566,11 @@ impl MarkdownPlugin for TabsPlugin {
         let tab_bar = TabBar::new(SharedString::from(format!("tab-bar-{block_id}")))
             .underline()
             .selected_index(active_index)
-            .children(data.tabs.iter().map(|tab| Tab::new().label(tab.title.clone())))
+            .children(
+                data.tabs
+                    .iter()
+                    .map(|tab| Tab::new().label(tab.title.clone())),
+            )
             .suffix(copy_button)
             .on_click(move |&new_idx, _window, cx| {
                 state.set_active(block_id, new_idx, cx);

@@ -53,21 +53,29 @@ struct MainWindow {
 
 impl Global for MainWindow {}
 
-
 struct StdErrLogger;
 impl log::Log for StdErrLogger {
-    fn enabled(&self, meta: &log::Metadata) -> bool { meta.level() <= log::Level::Trace }
-    fn log(&self, record: &log::Record) { eprintln!("[{}::{}] {}", record.level(), record.target(), record.args()); }
+    fn enabled(&self, meta: &log::Metadata) -> bool {
+        meta.level() <= log::Level::Trace
+    }
+    fn log(&self, record: &log::Record) {
+        eprintln!(
+            "[{}::{}] {}",
+            record.level(),
+            record.target(),
+            record.args()
+        );
+    }
     fn flush(&self) {}
 }
 
 fn main() {
     let _ = log::set_boxed_logger(Box::new(StdErrLogger));
     let level = match std::env::var("RUST_LOG") {
-    Ok(_) => log::LevelFilter::Trace,
-    Err(_) => log::LevelFilter::Warn,
-};
-log::set_max_level(level);
+        Ok(_) => log::LevelFilter::Trace,
+        Err(_) => log::LevelFilter::Warn,
+    };
+    log::set_max_level(level);
     let paths: Vec<PathBuf> = std::env::args_os()
         .skip(1)
         .filter(|arg| !arg.to_string_lossy().starts_with('-'))
@@ -163,7 +171,9 @@ fn open_paths(
 ) {
     if paths.is_empty() {
         if let Some(main) = cx.try_global::<MainWindow>() {
-            _ = main.handle.update(cx, |_, window, _| window.activate_window());
+            _ = main
+                .handle
+                .update(cx, |_, window, _| window.activate_window());
         }
         return;
     }
@@ -256,7 +266,10 @@ fn forward_to_running_instance(paths: &[PathBuf]) -> bool {
         ) else {
             continue;
         };
-        if stream.set_read_timeout(Some(Duration::from_secs(2))).is_err() {
+        if stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .is_err()
+        {
             continue;
         }
         let mut payload = String::from(CLI_MAGIC);
@@ -270,9 +283,7 @@ fn forward_to_running_instance(paths: &[PathBuf]) -> bool {
         }
         let _ = stream.shutdown(std::net::Shutdown::Write);
         let mut reply = String::new();
-        if stream.read_to_string(&mut reply).is_ok()
-            && reply.contains("malgel-cli-ok")
-        {
+        if stream.read_to_string(&mut reply).is_ok() && reply.contains("malgel-cli-ok") {
             return true;
         }
     }

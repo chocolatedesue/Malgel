@@ -10,21 +10,24 @@ use std::{
 };
 
 use gpui_kit::{
-    base::Disableable as _,
-    div, img, px, App, Context, ElementId, FocusHandle, Focusable,
-    Image, ImageFormat, InteractiveElement as _, IntoElement, ParentElement as _,
-    prelude::FluentBuilder as _,
-    Render, Styled as _, Window,
+    App, Context, ElementId, FocusHandle, Focusable, Image, ImageFormat, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Window,
     assets::IconName,
+    base::Disableable as _,
     component::{
-        h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _,
+        ActiveTheme as _, Icon, Sizable as _,
         button::{Button, ButtonVariants as _},
+        h_flex,
         scroll::ScrollableElement as _,
+        v_flex,
     },
+    div, img,
+    prelude::FluentBuilder as _,
+    px,
 };
 
 use hayro_svg::{
-    convert, RenderCache, SvgRenderSettings,
+    RenderCache, SvgRenderSettings, convert,
     hayro_interpret::{
         InterpreterSettings,
         font::{FontData, FontQuery, StandardFont},
@@ -96,8 +99,10 @@ pub fn default_interpreter_settings() -> InterpreterSettings {
 /// Render all pages of a PDF document from raw bytes.
 pub fn render_pdf_bytes(bytes: &[u8]) -> Result<Vec<PdfPage>, String> {
     eprintln!("TRACE: render_pdf_bytes enter, {} bytes", bytes.len());
-    let pdf = Pdf::new(bytes.to_vec())
-        .map_err(|e| { eprintln!("TRACE: Pdf::new failed: {e:?}"); format!("Failed to parse PDF: {e:?}") })?;
+    let pdf = Pdf::new(bytes.to_vec()).map_err(|e| {
+        eprintln!("TRACE: Pdf::new failed: {e:?}");
+        format!("Failed to parse PDF: {e:?}")
+    })?;
     eprintln!("TRACE: Pdf::new ok, {} pages", pdf.pages().len());
 
     let cache = RenderCache::new();
@@ -186,8 +191,7 @@ impl PdfView {
     /// Open and render a PDF document from a file path.
     pub fn from_path(path: impl AsRef<Path>, cx: &mut Context<Self>) -> Result<Self, String> {
         let path = path.as_ref().to_path_buf();
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("Failed to read file: {e}"))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read file: {e}"))?;
         Self::from_bytes(&bytes, Some(path), cx)
     }
 
@@ -277,16 +281,13 @@ impl PdfView {
                             .child(self.title.clone()),
                     )
                     .when(page_count > 0, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!(
-                                    "({} {})",
-                                    page_count,
-                                    if page_count == 1 { "page" } else { "pages" }
-                                )),
-                        )
+                        this.child(div().text_xs().text_color(theme.muted_foreground).child(
+                            format!(
+                                "({} {})",
+                                page_count,
+                                if page_count == 1 { "page" } else { "pages" }
+                            ),
+                        ))
                     }),
             )
             .child(
@@ -410,11 +411,7 @@ impl PdfView {
                             .shadow_md()
                             .rounded_sm()
                             .overflow_hidden()
-                            .child(
-                                img(page.image.clone())
-                                    .w(width)
-                                    .h(height),
-                            ),
+                            .child(img(page.image.clone()).w(width).h(height)),
                     )
                     .child(
                         div()
@@ -464,8 +461,8 @@ mod tests {
         )
         .expect("compile typst doc");
 
-        let pdf_bytes = typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default())
-            .expect("generate pdf bytes");
+        let pdf_bytes =
+            typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default()).expect("generate pdf bytes");
 
         let pages = render_pdf_bytes(&pdf_bytes).expect("render pdf pages");
         assert_eq!(pages.len(), 1);
