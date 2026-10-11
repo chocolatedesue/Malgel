@@ -92,10 +92,10 @@ jobs:
           fi
           echo "Version $version"
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "DMG=Malgel-$version-macos-universal.dmg" >> "$GITHUB_ENV"
+          echo "DMG=Malgel-$version-macos-arm64.dmg" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          targets: aarch64-apple-darwin
       # Compiled dependencies, restored so a release rebuilds little but
       # Malgel itself. Saved even when a later step (signing, packaging)
       # fails, so a retry doesn't start from scratch.
@@ -178,18 +178,13 @@ jobs:
             exit 1
           fi
 
-      - name: Build a universal binary
+      - name: Build the arm64 binary
         run: |
-          # One after the other: building both in a single cargo run was
-          # slower (26 minutes against 17), as the two link-time-optimized
-          # builds compete for the runner's memory.
+          # Apple silicon only: the second architecture doubled the job
+          # time for a slice of the audience that can revisit later.
           cargo build --release --locked --target aarch64-apple-darwin
-          cargo build --release --locked --target x86_64-apple-darwin
           mkdir -p dist
-          lipo -create -output dist/malgel \
-            target/aarch64-apple-darwin/release/malgel \
-            target/x86_64-apple-darwin/release/malgel
-          lipo -info dist/malgel
+          cp target/aarch64-apple-darwin/release/malgel dist/malgel
 
       - name: Assemble Malgel.app
         run: packaging/macos/bundle.sh dist/malgel "$VERSION" dist

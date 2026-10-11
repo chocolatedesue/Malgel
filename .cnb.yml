@@ -21,6 +21,13 @@ main:
         cpus: 16
       docker:
         image: rust:1-bookworm
+        # Persist cargo downloads and build artifacts across builds; the
+        # volumes live on the build node, so a repeat build on the same
+        # node skips nearly all compilation.
+        volumes:
+          - /usr/local/cargo/registry
+          - /usr/local/cargo/git
+          - ./target
       env:
         DIST_BRANCH: dist/linux-x86_64
       stages:
@@ -72,6 +79,11 @@ main:
         cpus: 16
       docker:
         image: ghcr.io/rust-cross/cargo-xwin:latest
+        # Same cache story as the Linux job; the cross target dir joins in.
+        volumes:
+          - /usr/local/cargo/registry
+          - /usr/local/cargo/git
+          - ./target
       env:
         DIST_BRANCH: dist/windows-x86_64
         AWS_LC_SYS_PREBUILT_NASM: "1"
