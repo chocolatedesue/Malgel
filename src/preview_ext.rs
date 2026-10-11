@@ -304,7 +304,8 @@ pub fn parse_tab_header(line: &str) -> Option<(&str, bool)> {
         } else {
             (after, false)
         }
-    } else if let Some(after) = trimmed.strip_prefix("---") {
+    } else {
+        let after = trimmed.strip_prefix("---")?;
         let after = after.trim_start();
         if after.is_empty() {
             return None;
@@ -314,8 +315,6 @@ pub fn parse_tab_header(line: &str) -> Option<(&str, bool)> {
             .or_else(|| after.strip_prefix("Tab:"))
             .unwrap_or(after);
         (after, false)
-    } else {
-        return None;
     };
 
     let title = rest.trim();
@@ -354,14 +353,12 @@ fn dedent_lines(lines: &[&str]) -> String {
         if line.trim().is_empty() {
             result.push("");
         } else if min_indent > 0 {
-            let mut char_count = 0;
             let mut byte_idx = line.len();
-            for (idx, _) in line.char_indices() {
+            for (char_count, (idx, _)) in line.char_indices().enumerate() {
                 if char_count == min_indent {
                     byte_idx = idx;
                     break;
                 }
-                char_count += 1;
             }
             result.push(&line[byte_idx..]);
         } else {
@@ -427,10 +424,8 @@ pub fn parse_tabs_container(source: &str) -> Option<(Vec<TabItem>, usize)> {
         after
     } else if let Some(after) = trimmed.strip_prefix(":::tab") {
         after
-    } else if let Some(after) = trimmed.strip_prefix(":::tabbed") {
-        after
     } else {
-        return None;
+        trimmed.strip_prefix(":::tabbed")?
     };
     parse_tabs_body(body)
 }
