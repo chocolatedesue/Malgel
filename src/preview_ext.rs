@@ -1251,7 +1251,6 @@ mod tests {
         assert_eq!(hex_over(gpui_kit::rgb(0x0969da).into(), black), "#0969da");
     }
 
-
     #[test]
     fn normalizes_multitab_container() {
         let src = "intro\n\n:::tabs\n@tab A\nbody a\n\n@tab B\nbody b\n:::\n\nafter\n";
@@ -1262,7 +1261,12 @@ mod tests {
         assert!(out.contains("body b"));
         assert!(!out.contains(":::tabs"));
         let (tabs, _) = parse_tabs_body(
-            out.split("````tabs\n").nth(1).unwrap().split("````\n").next().unwrap(),
+            out.split("````tabs\n")
+                .nth(1)
+                .unwrap()
+                .split("````\n")
+                .next()
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(tabs.len(), 2);
@@ -1273,7 +1277,12 @@ mod tests {
         let src = ":::tabs\n@tab A\n```bash\nrun a\n```\n\n@tab B\nbody\n:::\n";
         let out = normalize_tab_containers(src);
         let (tabs, _) = parse_tabs_body(
-            out.split("````tabs\n").nth(1).unwrap().split("````\n").next().unwrap(),
+            out.split("````tabs\n")
+                .nth(1)
+                .unwrap()
+                .split("````\n")
+                .next()
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(tabs.len(), 2);
