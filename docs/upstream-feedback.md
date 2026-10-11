@@ -158,6 +158,16 @@ reachable in phases:
 3. **Full UI extensions**: needs a webview/compositing surface in gpui
    (or an exported component model) - blocked on gpui itself today.
 
+## 9. Non-markdown text files render as highlighted code
+
+Opening a source file (.rs, .py, .toml, ...) parsed its text as
+markdown - paragraph soup in the preview. The preview now wraps
+non-markdown documents in a fenced code block tagged by the file
+extension (a 30-entry extension -> language map in document.rs), so the
+existing tree-sitter highlighter colors it. Markdown keeps its normal
+document rendering; binaries still fail in load_path with a readable
+error.
+
 ## Known issue, partially fixed
 
 - **PDF page offset**: the PDF page can render right-shifted instead of
