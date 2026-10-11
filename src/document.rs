@@ -107,6 +107,44 @@ pub fn is_markdown_path(path: &Path) -> bool {
 
 /// Whether `path` is a PDF document.
 #[allow(dead_code)]
+/// The tree-sitter language tag for a path's extension, for rendering
+/// non-markdown files as highlighted code in the preview.
+pub fn language_tag(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "rs" => "rust",
+        "py" => "python",
+        "toml" => "toml",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "go" => "go",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => "cpp",
+        "java" => "java",
+        "rb" => "ruby",
+        "sh" | "bash" | "zsh" => "bash",
+        "yml" | "yaml" => "yaml",
+        "json" => "json",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "kt" | "kts" => "kotlin",
+        "zig" => "zig",
+        "lua" => "lua",
+        "php" => "php",
+        "cs" => "csharp",
+        "scala" => "scala",
+        "ex" | "exs" => "elixir",
+        "swift" => "swift",
+        "mk" | "makefile" | "mak" => "make",
+        "cmake" => "cmake",
+        "proto" => "proto",
+        "diff" | "patch" => "diff",
+        "md" | "markdown" => "markdown",
+        _ => return None,
+    })
+}
+
 pub fn is_pdf_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())

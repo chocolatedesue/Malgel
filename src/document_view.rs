@@ -435,10 +435,26 @@ impl DocumentView {
 
     fn on_text_changed(&mut self, debounce: bool, cx: &mut Context<Self>) {
         let source = self.editor.read(cx).value();
+        // Non-markdown text files render as one highlighted code block: the
+        // extension picks the tree-sitter language for the preview's
+        // highlighter. Markdown keeps its normal document rendering.
+        let is_markdown = self
+            .path
+            .as_deref()
+            .map(crate::document::is_markdown_path)
+            .unwrap_or(true);
+        let preview_source = if is_markdown {
+            crate::preview_ext::normalize_tab_containers(&source)
+        } else {
+            let lang = self
+                .path
+                .as_deref()
+                .and_then(crate::document::language_tag)
+                .unwrap_or("");
+            format!("````{lang}\n{source}\n````")
+        };
         self.preview
-            .update(cx, |preview, cx| {
-                    preview.set_text(&crate::preview_ext::normalize_tab_containers(&source), cx)
-                });
+            .update(cx, |preview, cx| preview.set_text(&preview_source, cx));
         self.source = source;
         // Assume an edit until the analysis can tell the text matches disk.
         self.dirty = true;
