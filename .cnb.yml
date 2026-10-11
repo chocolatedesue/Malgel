@@ -1,0 +1,116 @@
+# Malgel multi-platform GUI builds on CNB.
+#
+# Every push to main builds two targets in parallel on CNB cloud nodes:
+#   - linux-x86_64   native build, tar.gz + AppImage
+#   - windows-x86_64 cross-compiled with cargo-xwin (MSVC), portable zip
+# Packages land on per-platform dist branches (dist/<platform>); the repo
+# root stays clean.
+#
+# macOS is NOT built here: CNB has no cloud macOS nodes, and a self-hosted
+# Mac build node would occupy the local Mac — per user decision (2026-10-11)
+# the macOS part goes through the cloud pipeline instead: the GitHub Actions
+# workflow `release.yml` on chocolatedesue/Malgel builds the universal DMG
+# on a hosted macOS runner (workflow_dispatch, publish=draft), together
+# with the Windows installer and Linux packages on the same draft release.
+
+main:
+  push:
+    - name: linux-x86_64
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 16
+      docker:
+        image: rust:1-bookworm
+      env:
+        DIST_BRANCH: dist/linux-x86_64
+      stages:
+        - name: system-deps
+          script: |
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends cmake nasm zip \
+              libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
+              libx11-xcb-dev libssl-dev libzstd-dev libvulkan1
+        - name: cargo-mirror
+          script: mkdir -p .cargo && printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n' > .cargo/config.toml
+        - name: build
+          script: cargo build --release --locked
+        - name: package
+          script: |
+            VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            bash packaging/linux/package.sh target/release/malgel "$VERSION" dist
+            curl -fsSL --retry 2 --connect-timeout 15 -o /tmp/linuxdeploy \
+              https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
+              && chmod +x /tmp/linuxdeploy \
+              && APPIMAGE_EXTRACT_AND_RUN=1 LINUXDEPLOY=/tmp/linuxdeploy \
+                 bash packaging/linux/package.sh target/release/malgel "$VERSION" dist \
+              || echo "linuxdeploy unavailable; shipping tar.gz only"
+            ls -la dist/
+        - name: upload-dist
+          script: |
+            set -e
+            command -v git >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq git; }
+            VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            SRC_DIR="${CNB_BUILD_WORKSPACE:-$PWD}"
+            PUSH_URL="https://${CNB_TOKEN_USER_NAME}:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git"
+            rm -rf /tmp/distrepo
+            git clone -q "$PUSH_URL" /tmp/distrepo
+            cd /tmp/distrepo
+            git config user.name "$CNB_TOKEN_USER_NAME"
+            git config user.email "ci@cnb.cool"
+            git checkout -q --orphan tmp-dist-upload
+            git rm -rqf . 2>/dev/null || true
+            cp -a "$SRC_DIR"/dist/* ./
+            SRC_SHORT=$(git -C "$SRC_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
+            git add -A
+            git commit -qm "dist: ${DIST_BRANCH#dist/} v$VERSION (src $SRC_SHORT)"
+            git push -q origin tmp-dist-upload:"$DIST_BRANCH" --force
+            echo "pushed packages to $DIST_BRANCH"
+
+    - name: windows-x86_64
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 16
+      docker:
+        image: ghcr.io/rust-cross/cargo-xwin:latest
+      env:
+        DIST_BRANCH: dist/windows-x86_64
+        AWS_LC_SYS_PREBUILT_NASM: "1"
+        XWIN_ARCH: x86_64
+      stages:
+        - name: cargo-mirror
+          script: mkdir -p .cargo && printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n' > .cargo/config.toml
+        - name: build
+          script: cargo xwin build --release --locked --target x86_64-pc-windows-msvc
+        - name: package
+          script: |
+            set -e
+            command -v zip >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq zip; }
+            VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            mkdir -p dist/stage
+            cp target/x86_64-pc-windows-msvc/release/malgel.exe dist/stage/Malgel.exe
+            for doc in README.md LICENSE NOTICE; do
+              [ -f "$doc" ] && cp "$doc" dist/stage/
+            done
+            (cd dist/stage && zip -q -r "../Malgel-$VERSION-windows-x64.zip" .)
+            rm -rf dist/stage
+            ls -la dist/
+        - name: upload-dist
+          script: |
+            set -e
+            command -v git >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq git; }
+            VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            SRC_DIR="${CNB_BUILD_WORKSPACE:-$PWD}"
+            PUSH_URL="https://${CNB_TOKEN_USER_NAME}:${CNB_TOKEN}@cnb.cool/${CNB_REPO_SLUG}.git"
+            rm -rf /tmp/distrepo
+            git clone -q "$PUSH_URL" /tmp/distrepo
+            cd /tmp/distrepo
+            git config user.name "$CNB_TOKEN_USER_NAME"
+            git config user.email "ci@cnb.cool"
+            git checkout -q --orphan tmp-dist-upload
+            git rm -rqf . 2>/dev/null || true
+            cp -a "$SRC_DIR"/dist/* ./
+            SRC_SHORT=$(git -C "$SRC_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
+            git add -A
+            git commit -qm "dist: ${DIST_BRANCH#dist/} v$VERSION (src $SRC_SHORT)"
+            git push -q origin tmp-dist-upload:"$DIST_BRANCH" --force
+            echo "pushed packages to $DIST_BRANCH"
