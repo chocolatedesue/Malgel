@@ -39,11 +39,16 @@ pub struct LoadedText {
 /// Read a UTF-8 text file. A byte-order mark is dropped.
 pub fn load(path: &Path) -> io::Result<LoadedText> {
     let bytes = fs::read(path)?;
-    let text = String::from_utf8(bytes).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "The file isn’t valid UTF-8 text.",
-        )
+    let text = String::from_utf8(bytes).map_err(|err| {
+        // Distinguish a genuinely binary file from text that merely has a
+        // stray invalid byte, so the message tells the user what happened.
+        let bytes = err.as_bytes();
+        let message = if looks_binary(bytes) {
+            "This looks like a binary file, which Malgel can’t show as text."
+        } else {
+            "The file isn’t valid UTF-8 text."
+        };
+        io::Error::new(io::ErrorKind::InvalidData, message)
     })?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let line_ending = LineEnding::detect(text);
@@ -52,6 +57,24 @@ pub fn load(path: &Path) -> io::Result<LoadedText> {
         LineEnding::Lf => text.to_string(),
     };
     Ok(LoadedText { text, line_ending })
+}
+
+/// Whether `bytes` look like binary data rather than text: a NUL byte, or a
+/// large share of control bytes in the sample. Used only to pick a clearer
+/// error message; it never decides how a file is opened.
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.is_empty() {
+        return false;
+    }
+    if sample.contains(&0) {
+        return true;
+    }
+    let control = sample
+        .iter()
+        .filter(|&&byte| byte < 0x09 || (0x0e..0x20).contains(&byte))
+        .count();
+    control * 100 / sample.len() > 10
 }
 
 /// Write `text` to `path` atomically: a temporary sibling file is written and
@@ -143,6 +166,17 @@ pub fn language_tag(path: &Path) -> Option<&'static str> {
         "md" | "markdown" => "markdown",
         _ => return None,
     })
+}
+
+/// Whether `path` names an image the app can preview.
+pub fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some(ext) if matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "ico" | "svg"
+        )
+    )
 }
 
 pub fn is_pdf_path(path: &Path) -> bool {
