@@ -13,10 +13,10 @@ use std::{
 };
 
 use gpui_kit::{
-    Anchor, App, AppContext as _, Bounds, Context, Entity, EntityId, ExternalPaths, FocusHandle,
-    Focusable, FontWeight, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    PathPromptOptions, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, WindowBounds,
+    Anchor, App, AppContext as _, Bounds, Context, DragMoveEvent, Entity, EntityId, ExternalPaths,
+    FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, PathPromptOptions, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, WindowBounds,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -49,7 +49,7 @@ use crate::{
     document::{self, LineEnding, display_name},
     document_view::{DocumentEvent, DocumentView},
     docx, export,
-    file_tree::{FileTree, FileTreeEvent},
+    file_tree::{FileTree, FileTreeEvent, TreeDrag},
     format,
     links::{self, LinkTarget},
     pdf::{self, Paper},
@@ -101,6 +101,43 @@ enum DiskChange {
     Touched(Option<DiskStamp>),
 }
 
+/// A tab being dragged to a new position, the way tabs reorder in VS Code.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TabDrag {
+    index: usize,
+}
+
+/// Where a dragged tab would land: before tab `gap` (`gap == tab count`
+/// means after the last one), coming from tab `source`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TabInsertion {
+    gap: usize,
+    source: usize,
+}
+
+/// The ghost rendered under the cursor while a tab or a tree entry is
+/// being dragged.
+pub(crate) struct DragGhost {
+    pub(crate) label: SharedString,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .text_sm()
+            .text_color(theme.foreground)
+            .shadow_md()
+            .child(self.label.clone())
+    }
+}
+
 pub struct Workspace {
     focus_handle: FocusHandle,
     documents: Vec<Entity<DocumentView>>,
@@ -117,6 +154,12 @@ pub struct Workspace {
     /// Files changed on disk that are waiting for the user to decide.
     pending_disk_prompt: HashSet<EntityId>,
     last_session: Option<Session>,
+    /// Where a dragged tab would land while the pointer moves across the
+    /// tab bar (VS Code's insertion line), `None` when no tab is dragging.
+    tab_insertion: Option<TabInsertion>,
+    /// The tab bar's bounds as of the last drag move, so a drop outside the
+    /// bar can clear the insertion line.
+    tab_bar_bounds: Cell<Option<Bounds<Pixels>>>,
     _watch_task: Task<()>,
     document_subscriptions: Vec<(EntityId, Vec<Subscription>)>,
     _subscriptions: Vec<Subscription>,
@@ -154,6 +197,9 @@ impl Workspace {
                             ),
                         };
                         window.push_notification(Notification::info(message), cx);
+                    }
+                    FileTreeEvent::Moved { from, to } => {
+                        this.retarget_moved(from, to, window, cx);
                     }
                 },
             ),
@@ -200,6 +246,8 @@ impl Workspace {
             discarded: HashSet::new(),
             pending_disk_prompt: HashSet::new(),
             last_session: None,
+            tab_insertion: None,
+            tab_bar_bounds: Cell::new(None),
             _watch_task: watch_task,
             document_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
@@ -1635,6 +1683,105 @@ impl Workspace {
         }
     }
 
+    /// A tree entry dropped outside the file tree: a file opens, a folder
+    /// is already the tree's root so there is nothing to do.
+    fn on_drop_tree_drag(&mut self, drag: &TreeDrag, window: &mut Window, cx: &mut Context<Self>) {
+        if drag.path.is_dir() {
+            return;
+        }
+        self.open_paths(vec![drag.path.clone()], window, cx);
+    }
+
+    /// Record where the pointer would land a dragged tab: before or after
+    /// the tab it is over, and show the insertion line.
+    fn set_tab_insertion(
+        &mut self,
+        event: &DragMoveEvent<TabDrag>,
+        hovered: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let source = event.drag(cx).index;
+        let center = event.bounds.origin.x + event.bounds.size.width * 0.5;
+        let after = event.event.position.x >= center;
+        let gap = (hovered + usize::from(after)).min(self.documents.len());
+        let insertion = Some(TabInsertion { gap, source });
+        if self.tab_insertion != insertion {
+            self.tab_insertion = insertion;
+            cx.notify();
+        }
+    }
+
+    /// Land a dragged tab at `to_gap`, the way VS Code reorders tabs.
+    fn move_tab(
+        &mut self,
+        from: usize,
+        to_gap: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if from >= self.documents.len() {
+            return;
+        }
+        let doc = self.documents.remove(from);
+        let mut gap = to_gap.min(self.documents.len() + 1);
+        if gap > from {
+            // Positions after the removal shift left by one.
+            gap -= 1;
+        }
+        self.documents.insert(gap, doc);
+        self.active = gap;
+        self.save_session(window, cx);
+        cx.notify();
+    }
+
+    /// Open documents whose files just moved in the tree now point at the
+    /// new locations, as VS Code's editors follow renames.
+    fn retarget_moved(
+        &mut self,
+        from: &Path,
+        to: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut moved = Vec::new();
+        for doc in &self.documents {
+            let Some(path) = doc.read(cx).path().cloned() else {
+                continue;
+            };
+            let new_path = if path == *from {
+                Some(to.to_path_buf())
+            } else if path.starts_with(from) {
+                match path.strip_prefix(from) {
+                    Ok(suffix) => Some(to.join(suffix)),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            if let Some(new_path) = new_path {
+                moved.push((doc.clone(), new_path));
+            }
+        }
+        if moved.is_empty() {
+            return;
+        }
+        for (doc, new_path) in moved {
+            doc.update(cx, |doc, cx| doc.retarget(new_path, cx));
+        }
+        AppSettings::update(cx, |settings| {
+            for recent in &mut settings.recent_files {
+                if recent == from {
+                    *recent = to.to_path_buf();
+                } else if let Ok(suffix) = recent.strip_prefix(from) {
+                    *recent = to.join(suffix);
+                }
+            }
+        });
+        self.sync_file_tree(cx);
+        self.save_session(window, cx);
+        cx.notify();
+    }
+
     // ---------------------------------------------------------------------
     // View commands
 
@@ -1877,6 +2024,17 @@ impl Workspace {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.tab_bar)
+            // While a tab drags, remember the bar's bounds and, on drop,
+            // land the tab at the insertion point the tabs reported.
+            .on_drag_move::<TabDrag>(cx.listener(|this, event: &DragMoveEvent<TabDrag>, _, _| {
+                this.tab_bar_bounds.set(Some(event.bounds));
+            }))
+            .on_drop(cx.listener(|this, _: &TabDrag, window, cx| {
+                let insertion = this.tab_insertion.take();
+                if let Some(insertion) = insertion {
+                    this.move_tab(insertion.source, insertion.gap, window, cx);
+                }
+            }))
             .when(count > 1, |this| {
                 this.child(
                     Button::new("tab-scroll-prev")
@@ -1914,10 +2072,12 @@ impl Workspace {
                         let theme = cx.theme();
                         let doc_weak = doc_entity.clone();
                         let ws_menu = workspace.clone();
+                        let drag_label: SharedString = name.clone().into();
 
                         h_flex()
                             .id(("tab", ix))
                             .group("tab")
+                            .relative()
                             .h(px(28.))
                             .max_w(px(220.))
                             .flex_none()
@@ -1928,6 +2088,18 @@ impl Workspace {
                             .rounded_md()
                             .text_sm()
                             .cursor_pointer()
+                            // Tabs drag to a new position, the way they
+                            // reorder in VS Code.
+                            .on_drag(TabDrag { index: ix }, move |_, _, _, cx| {
+                                cx.new(|_| DragGhost {
+                                    label: drag_label.clone(),
+                                })
+                            })
+                            .on_drag_move::<TabDrag>(cx.listener(
+                                move |this, event: &DragMoveEvent<TabDrag>, _, cx| {
+                                    this.set_tab_insertion(event, ix, cx);
+                                },
+                            ))
                             .when(active, |this| {
                                 this.bg(theme.tab_active)
                                     .text_color(theme.tab_active_foreground)
@@ -1995,6 +2167,41 @@ impl Workspace {
                                             );
                                         }),
                                     ),
+                            )
+                            // VS Code-style insertion line where a dragged
+                            // tab would land: left edge of this tab, or the
+                            // right edge of the last one.
+                            .when(
+                                self.tab_insertion.map(|insertion| insertion.gap) == Some(ix),
+                                |this| {
+                                    this.child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .top(px(4.))
+                                            .bottom(px(4.))
+                                            .w(px(2.))
+                                            .rounded_full()
+                                            .bg(theme.primary),
+                                    )
+                                },
+                            )
+                            .when(
+                                ix + 1 == count
+                                    && self.tab_insertion.map(|insertion| insertion.gap)
+                                        == Some(count),
+                                |this| {
+                                    this.child(
+                                        div()
+                                            .absolute()
+                                            .right_0()
+                                            .top(px(4.))
+                                            .bottom(px(4.))
+                                            .w(px(2.))
+                                            .rounded_full()
+                                            .bg(theme.primary),
+                                    )
+                                },
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -2957,6 +3164,23 @@ impl Render for Workspace {
             }))
             .on_drop(cx.listener(Self::on_drop_paths))
             .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+            // A tree entry dropped outside the file tree opens (files) the
+            // way dropping it in VS Code's editor area does; dropping it on
+            // a tree folder is handled by the tree itself.
+            .on_drop(cx.listener(Self::on_drop_tree_drag))
+            .drag_over::<TreeDrag>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+            // While a tab drags, clear the insertion line whenever the
+            // pointer leaves the tab bar; the bar re-sets its bounds and
+            // the hovered tab re-sets the line after this (capture order).
+            .on_drag_move::<TabDrag>(cx.listener(|this, event: &DragMoveEvent<TabDrag>, _, cx| {
+                let inside = this
+                    .tab_bar_bounds
+                    .get()
+                    .is_some_and(|bounds| bounds.contains(&event.event.position));
+                if !inside && this.tab_insertion.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .child(self.render_title_bar(cx))
             .child(div().flex_1().min_h_0().overflow_hidden().child(main))
             .when(!focus_mode, |this| this.child(self.render_status_bar(cx)))

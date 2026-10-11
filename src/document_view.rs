@@ -249,6 +249,15 @@ impl DocumentView {
         self.path.as_ref()
     }
 
+    /// Point this document at a new path because its file moved in the
+    /// file tree; the content is unchanged, so only the location and the
+    /// stamp used to notice other programs' changes follow.
+    pub fn retarget(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.path = Some(path);
+        self.disk = self.path.as_deref().and_then(DiskStamp::of);
+        cx.notify();
+    }
+
     /// A document displaying an image (PNG, JPEG, SVG, …) with zoom.
     pub fn new_image(
         path: PathBuf,
