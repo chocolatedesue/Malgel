@@ -436,7 +436,9 @@ impl DocumentView {
     fn on_text_changed(&mut self, debounce: bool, cx: &mut Context<Self>) {
         let source = self.editor.read(cx).value();
         self.preview
-            .update(cx, |preview, cx| preview.set_text(&source, cx));
+            .update(cx, |preview, cx| {
+                    preview.set_text(&crate::preview_ext::normalize_tab_containers(&source), cx)
+                });
         self.source = source;
         // Assume an edit until the analysis can tell the text matches disk.
         self.dirty = true;

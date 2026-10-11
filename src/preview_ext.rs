@@ -422,6 +422,66 @@ pub fn parse_tabs_body(body: &str) -> Option<(Vec<TabItem>, usize)> {
     }
 }
 
+/// Rewrite `:::tabs` / `:::tab` / `:::tabbed` container regions into
+/// ```` ```tabs ```` fenced blocks the tabs plugin can parse.
+///
+/// The markdown pipeline parses block by block, so a container that spans a
+/// paragraph, a fenced code block and another paragraph cannot be matched by
+/// the per-node plugin: its later `@tab` sections would leak as raw text.
+/// Normalizing the source up front keeps multi-tab containers intact.
+pub fn normalize_tab_containers(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() + 16);
+    let mut fence: Option<(char, usize)> = None; // open code fence: (marker, run length)
+    let mut lines = src.lines();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        if let Some((marker, len)) = fence {
+            out.push_str(line);
+            out.push('\n');
+            let run = trimmed.chars().take_while(|c| *c == marker).count();
+            if run >= len && trimmed.chars().all(|c| c == marker) {
+                fence = None;
+            }
+            continue;
+        }
+        let backticks = trimmed.chars().take_while(|c| *c == '`').count();
+        let tildes = trimmed.chars().take_while(|c| *c == '~').count();
+        if backticks >= 3 {
+            out.push_str(line);
+            out.push('\n');
+            fence = Some(('`', backticks));
+            continue;
+        }
+        if tildes >= 3 {
+            out.push_str(line);
+            out.push('\n');
+            fence = Some(('~', tildes));
+            continue;
+        }
+        let is_open = trimmed == ":::tabs"
+            || trimmed == ":::tab"
+            || trimmed == ":::tabbed"
+            || trimmed.starts_with(":::tabs ")
+            || trimmed.starts_with(":::tab ")
+            || trimmed.starts_with(":::tabbed ");
+        if is_open {
+            out.push_str("````tabs\n");
+            for inner in lines.by_ref() {
+                if inner.trim_start() == ":::" {
+                    break;
+                }
+                out.push_str(inner);
+                out.push('\n');
+            }
+            out.push_str("````\n");
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// Parse a container block starting with `:::tabs` or `:::tab`.
 pub fn parse_tabs_container(source: &str) -> Option<(Vec<TabItem>, usize)> {
     let trimmed = source.trim();
@@ -1192,6 +1252,43 @@ mod tests {
         assert_eq!(hex_over(black, white), "#000000");
         assert_eq!(hex_over(black.opacity(0.5), white), "#808080");
         assert_eq!(hex_over(gpui_kit::rgb(0x0969da).into(), black), "#0969da");
+    }
+
+
+    #[test]
+    fn normalizes_multitab_container() {
+        let src = "intro\n\n:::tabs\n@tab A\nbody a\n\n@tab B\nbody b\n:::\n\nafter\n";
+        let out = normalize_tab_containers(src);
+        assert!(out.contains("````tabs"), "wrapped: {out}");
+        assert!(out.contains("@tab A"));
+        assert!(out.contains("@tab B"));
+        assert!(out.contains("body b"));
+        assert!(!out.contains(":::tabs"));
+        let (tabs, _) = parse_tabs_body(
+            out.split("````tabs\n").nth(1).unwrap().split("````\n").next().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tabs.len(), 2);
+    }
+
+    #[test]
+    fn normalizes_container_with_inner_fence() {
+        let src = ":::tabs\n@tab A\n```bash\nrun a\n```\n\n@tab B\nbody\n:::\n";
+        let out = normalize_tab_containers(src);
+        let (tabs, _) = parse_tabs_body(
+            out.split("````tabs\n").nth(1).unwrap().split("````\n").next().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs[0].content.contains("run a"));
+    }
+
+    #[test]
+    fn leaves_code_blocks_alone() {
+        let src = "```text\n:::tabs\n@tab A\n:::\n```\n";
+        let out = normalize_tab_containers(src);
+        assert!(out.contains("```text"));
+        assert!(!out.contains("````tabs"));
     }
 
     #[test]
