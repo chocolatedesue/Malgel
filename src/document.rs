@@ -105,6 +105,14 @@ pub fn is_markdown_path(path: &Path) -> bool {
         })
 }
 
+/// Whether `path` is a PDF document.
+#[allow(dead_code)]
+pub fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
 /// The name shown for a document in the title bar and dialogs.
 pub fn display_name(path: Option<&PathBuf>) -> String {
     path.and_then(|path| path.file_name())
@@ -148,5 +156,15 @@ mod tests {
         assert!(is_markdown_path(Path::new("notes.MARKDOWN")));
         assert!(!is_markdown_path(Path::new("image.png")));
         assert_eq!(display_name(None), "Untitled");
+    }
+
+    #[test]
+    fn recognizes_pdf_extensions() {
+        assert!(is_pdf_path(Path::new("document.pdf")));
+        assert!(is_pdf_path(Path::new("REPORT.PDF")));
+        assert!(is_pdf_path(Path::new("/a/b/c/doc.Pdf")));
+        assert!(!is_pdf_path(Path::new("document.md")));
+        assert!(!is_pdf_path(Path::new("image.png")));
+        assert!(!is_pdf_path(Path::new("pdf")));
     }
 }

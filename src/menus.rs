@@ -113,6 +113,8 @@ pub fn build(cx: &App) -> Vec<Menu> {
         ),
         MenuItem::separator(),
         MenuItem::action("Close", CloseDocument),
+        MenuItem::action("Close other tabs", CloseOtherTabs),
+        MenuItem::action("Close tabs to the right", CloseTabsToTheRight),
         MenuItem::action("Close window", CloseWindow),
     ];
     if !macos {
@@ -290,7 +292,7 @@ mod tests {
                     _ => String::new(),
                 })
                 .collect();
-            assert_eq!(checked, ["Preview", "Sync scrolling", "Line numbers"]);
+            assert_eq!(checked, ["Preview", "Tabs", "Sync scrolling", "Line numbers"]);
         });
     }
 

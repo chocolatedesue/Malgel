@@ -91,6 +91,7 @@ pub enum DocumentEvent {
 pub struct DocumentView {
     editor: Entity<EditorState>,
     preview: Entity<TextViewState>,
+    pdf: Option<Entity<crate::pdf_view::PdfView>>,
     /// Parser configuration for the preview; built once so the preview can
     /// tell that it is unchanged between frames.
     markdown_extensions: gpui_kit::component::text::MarkdownExtensions,
@@ -196,6 +197,7 @@ impl DocumentView {
 
         let mut this = Self {
             editor,
+            pdf: None,
             markdown_extensions: preview_ext::markdown_extensions(&preview),
             preview,
             path: None,
@@ -245,7 +247,56 @@ impl DocumentView {
         self.path.as_ref()
     }
 
+    /// A document displaying a PDF file rendered via Hayro.
+    pub fn new_pdf(
+        path: PathBuf,
+        pages: Vec<crate::pdf_view::PdfPage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let pdf = cx.new(|cx| crate::pdf_view::PdfView::new(Some(path.clone()), pages, cx));
+        let editor = cx.new(|cx| EditorState::new(window, cx));
+        let preview = cx.new(|cx| TextViewState::markdown("", cx));
+        let markdown_extensions = preview_ext::markdown_extensions(&preview);
+        Self {
+            editor,
+            preview,
+            markdown_extensions,
+            pdf: Some(pdf),
+            path: Some(path),
+            line_ending: LineEnding::Lf,
+            saved_hash: 0,
+            dirty: false,
+            disk: None,
+            source: "".into(),
+            revision: 0,
+            analysis: Arc::new(Analysis::default()),
+            analysis_task: None,
+            pending_anchor: None,
+            recovery_id: session::new_recovery_id(),
+            recovery_written: false,
+            recovery_task: None,
+            misspellings: Arc::default(),
+            spell_task: None,
+            spell_checked: None,
+            last_cursor: 0,
+            focus_decorations: None,
+            focus_block: None,
+            scroll_driver: ScrollDriver::Editor,
+            synced_editor_scroll: None,
+            synced_preview_scroll: None,
+            editor_scroll_target: None,
+            synced_preview_rows: 0,
+            editor_width: px(0.),
+            preview_width: px(0.),
+            _subscriptions: Vec::new(),
+        }
+    }
+
     pub fn is_dirty(&self) -> bool {
+        if self.pdf.is_some() {
+            return false;
+        }
         self.dirty
     }
 
@@ -433,6 +484,9 @@ impl DocumentView {
 
     /// Write the current text to `path`, which becomes the document's.
     pub fn write_to(&mut self, path: &Path, cx: &mut Context<Self>) -> std::io::Result<()> {
+        if self.pdf.is_some() {
+            return Ok(());
+        }
         let text = self.editor.read(cx).value();
         crate::document::save(path, &text, self.line_ending)?;
         self.saved_hash = content_hash(&text);
@@ -1317,6 +1371,9 @@ impl DocumentView {
 
 impl Render for DocumentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(pdf) = &self.pdf {
+            return pdf.clone().into_any_element();
+        }
         if self.analysis_task.is_none()
             && let Some(anchor) = self.pending_anchor.take()
         {
