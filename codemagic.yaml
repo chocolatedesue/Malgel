@@ -1,0 +1,72 @@
+# Malgel macOS build on Codemagic.
+#
+# Mirrors the `macos` job of .github/workflows/release.yml: build both
+# architectures, lipo them into one universal binary, assemble Malgel.app,
+# sign it ad hoc (no Developer ID certificate is configured) and package a
+# DMG. Artifacts land on the build page.
+#
+# Used instead of the GitHub Actions job because this account's Actions
+# billing can't run (LAB-529); Codemagic's free tier gives 500 macOS
+# minutes per month, which covers a universal build with room to spare.
+workflows:
+  malgel-macos:
+    name: Malgel macOS universal
+    instance_type: mac_mini_m2
+    max_build_duration: 180
+    environment:
+      vars:
+        CARGO_TERM_COLOR: always
+        MACOSX_DEPLOYMENT_TARGET: "11.0"
+    cache:
+      cache_paths:
+        - $HOME/.cargo/registry
+        - $HOME/.cargo/git
+    scripts:
+      - name: Install Rust
+        script: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          . "$HOME/.cargo/env"
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustc --version
+      - name: Install build tools
+        script: |
+          command -v cmake >/dev/null 2>&1 || brew install cmake
+          cmake --version
+      - name: Read the version from Cargo.toml
+        script: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$VERSION" ]; then
+            echo "No version found in Cargo.toml"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$CM_ENV"
+          echo "Malgel $VERSION"
+      - name: Build a universal binary
+        script: |
+          . "$HOME/.cargo/env"
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/malgel \
+            target/aarch64-apple-darwin/release/malgel \
+            target/x86_64-apple-darwin/release/malgel
+          lipo -info dist/malgel
+      - name: Assemble Malgel.app
+        script: |
+          packaging/macos/bundle.sh dist/malgel "$VERSION" dist
+      - name: Sign Malgel.app (ad hoc)
+        script: |
+          codesign --force --sign - dist/Malgel.app
+          codesign --verify --strict --verbose=2 dist/Malgel.app
+      - name: Create the disk image
+        script: |
+          staging="/tmp/malgel-dmg"
+          mkdir -p "$staging"
+          ditto dist/Malgel.app "$staging/Malgel.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname Malgel -srcfolder "$staging" -fs HFS+ \
+            -format UDZO -ov "dist/Malgel-$VERSION-macos-universal.dmg"
+          ls -la dist/
+    artifacts:
+      - dist/*.dmg
+      - dist/Malgel.app
