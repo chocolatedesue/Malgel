@@ -950,7 +950,7 @@ impl Workspace {
             _ = this.update_in(cx, |this, window, cx| {
                 AppSettings::update(cx, |settings| settings.push_recent(&folder));
                 this.file_tree
-                    .update(cx, |tree, cx| tree.set_root(Some(folder), cx));
+                    .update(cx, |tree, cx| tree.set_root(Some(folder.clone()), cx));
                 this.sync_file_tree(cx);
                 AppSettings::update(cx, |settings| settings.file_sidebar = true);
                 this.save_session(window, cx);
@@ -1541,30 +1541,56 @@ impl Workspace {
         }
     }
 
+fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some(ext) if matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif"
+        )
+    )
+}
+
     fn on_drop_paths(
         &mut self,
         paths: &ExternalPaths,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let documents: Vec<PathBuf> = paths
-            .paths()
-            .iter()
-            .filter(|path| is_markdown_path(path))
-            .cloned()
-            .collect();
+        // Route drops the way VS Code does: folders open as the sidebar
+        // root, openable files open as documents, and only actual images
+        // keep the legacy "insert into the markdown source" behavior.
+        let mut documents: Vec<PathBuf> = Vec::new();
+        let mut folders: Vec<PathBuf> = Vec::new();
+        let mut images: Vec<PathBuf> = Vec::new();
+        for path in paths.paths() {
+            if path.is_dir() {
+                folders.push(path.clone());
+            } else if Self::is_image_path(path) {
+                images.push(path.clone());
+            } else {
+                documents.push(path.clone());
+            }
+        }
+        for folder in &folders {
+            self.file_tree
+                .update(cx, |tree, cx| tree.set_root(Some(folder.clone()), cx));
+        }
         if !documents.is_empty() {
             self.open_paths(documents, window, cx);
             return;
         }
-        if AppSettings::get(cx).layout.shows_editor() || AppSettings::get(cx).focus_mode {
-            let paths = paths.paths().to_vec();
+        if !images.is_empty()
+            && (AppSettings::get(cx).layout.shows_editor() || AppSettings::get(cx).focus_mode)
+        {
             self.active_document()
                 .clone()
-                .update(cx, |doc, cx| doc.drop_images(&paths, window, cx));
+                .update(cx, |doc, cx| doc.drop_images(&images, window, cx));
             return;
         }
-        self.notify_error("Drop a Markdown or text file to open it.", window, cx);
+        if folders.is_empty() {
+            self.notify_error("Drop a file or folder to open it.", window, cx);
+        }
     }
 
     // ---------------------------------------------------------------------
