@@ -379,7 +379,9 @@ impl PdfView {
             .flex_1()
             .min_h_0()
             .w_full()
-            .overflow_y_scrollbar()
+            .overflow_scrollbar()
+            // Wide pages must stay reachable even when the horizontal
+            // centering misbehaves on HiDPI/maximized windows.
             .bg(theme.background)
             .py_8()
             .px_4()
@@ -403,6 +405,7 @@ impl PdfView {
                                 "pdf-page-card".into(),
                                 page_num as u64,
                             ))
+                            .max_w_full()
                             .w(width)
                             .h(height)
                             .bg(gpui_kit::rgb(0xffffff))
@@ -411,7 +414,7 @@ impl PdfView {
                             .shadow_md()
                             .rounded_sm()
                             .overflow_hidden()
-                            .child(img(page.image.clone()).w(width).h(height)),
+                            .child(img(page.image.clone()).max_w_full().w(width).h(height)),
                     )
                     .child(
                         div()
