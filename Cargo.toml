@@ -119,4 +119,5 @@ debug = false
 lto = "thin"
 codegen-units = 1
 opt-level = 3
+debug-assertions = true
 strip = true
