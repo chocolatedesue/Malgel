@@ -1251,9 +1251,14 @@ impl Workspace {
                         .and_then(|dir| path.strip_prefix(dir).ok())
                         .unwrap_or(&path);
                     self.notify_error(format!("Couldn’t find “{}”.", shown.display()), window, cx);
-                } else if path.is_file()
-                    && (is_markdown_path(&path) || document::is_pdf_path(&path))
-                {
+                } else if path.is_dir() {
+                    self.file_tree
+                        .update(cx, |tree, cx| tree.set_root(Some(path), cx));
+                    self.sync_file_tree(cx);
+                } else if path.is_file() {
+                    // Any file follows its link in-app: PDFs open the viewer,
+                    // anything else opens as text (binaries fail in load_path
+                    // with a readable error instead of escaping to another app).
                     let mut new_tab = AppSettings::get(cx).open_links_in == LinkPlacement::NewTab;
                     if action.alternate {
                         new_tab = !new_tab;
