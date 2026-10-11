@@ -453,9 +453,8 @@ impl DocumentView {
                 .unwrap_or("");
             format!("````{lang}\n{source}\n````")
         };
-        self.preview.update(cx, |preview, cx| {
-            preview.set_text(&preview_source, cx)
-        });
+        self.preview
+            .update(cx, |preview, cx| preview.set_text(&preview_source, cx));
         self.source = source;
         // Assume an edit until the analysis can tell the text matches disk.
         self.dirty = true;

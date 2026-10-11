@@ -46,7 +46,7 @@ use crate::{
     actions::*,
     analysis::{Analysis, content_hash},
     default_app, diagram_viewer,
-    document::{self, LineEnding, display_name, is_markdown_path},
+    document::{self, LineEnding, display_name},
     document_view::{DocumentEvent, DocumentView},
     docx, export,
     file_tree::{FileTree, FileTreeEvent},
@@ -133,7 +133,7 @@ impl Workspace {
     ) -> Self {
         let settings = AppSettings::get(cx).clone();
         let headings = cx.new(|cx| CommandState::new(window, cx));
-        let file_tree = cx.new(|cx| FileTree::new(cx));
+        let file_tree = cx.new(FileTree::new);
 
         let subscriptions = vec![
             cx.subscribe_in(
@@ -854,9 +854,7 @@ impl Workspace {
         // fall through to the next most recent entry so the shortcut always
         // moves somewhere (repeated presses toggle between the two latest).
         let mut path = path;
-        if action.0 == 0
-            && path.is_file()
-            && self.active_document().read(cx).path() == Some(&path)
+        if action.0 == 0 && path.is_file() && self.active_document().read(cx).path() == Some(&path)
         {
             let Some(next) = settings.recent_files.get(1).cloned() else {
                 return;
@@ -1543,15 +1541,15 @@ impl Workspace {
         }
     }
 
-fn is_image_path(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some(ext) if matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif"
+    fn is_image_path(path: &Path) -> bool {
+        matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some(ext) if matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif"
+            )
         )
-    )
-}
+    }
 
     fn on_drop_paths(
         &mut self,
