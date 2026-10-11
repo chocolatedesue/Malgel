@@ -94,6 +94,7 @@ pub fn build(cx: &App) -> Vec<Menu> {
         MenuItem::action("New", NewFile),
         MenuItem::action("Open…", Open),
         MenuItem::action("Open folder…", OpenFolder),
+        MenuItem::action("Recent files…", ShowRecentFiles),
         submenu("Open recent", recent),
         MenuItem::separator(),
         MenuItem::action("Save", Save),

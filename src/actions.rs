@@ -3,6 +3,8 @@
 //! Every command is an Action so the title bar, the menu bar, the editor's
 //! context menu and the keyboard all dispatch the same thing.
 
+use std::path::PathBuf;
+
 use gpui_kit::{Action, App, KeyBinding, SharedString, actions};
 use serde::Deserialize;
 
@@ -15,6 +17,7 @@ actions!(
         Open,
         OpenFolder,
         SummonTerminal,
+        ShowRecentFiles,
         Save,
         SaveAs,
         ExportHtml,
@@ -85,6 +88,11 @@ pub struct SetTheme(pub SharedString);
 #[action(namespace = malgel, no_json)]
 pub struct OpenRecent(pub usize);
 
+/// Open this exact file, chosen from the recent files dialog.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = malgel, no_json)]
+pub struct OpenRecentPath(pub PathBuf);
+
 /// Show the open document at this index.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = malgel, no_json)]
@@ -133,7 +141,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewFile, None),
         KeyBinding::new("secondary-o", Open, None),
-        KeyBinding::new("secondary-r", OpenRecent(0), workspace),
+        KeyBinding::new("secondary-r", ShowRecentFiles, workspace),
         KeyBinding::new("secondary-s", Save, workspace),
         KeyBinding::new("secondary-shift-s", SaveAs, workspace),
         KeyBinding::new("secondary-shift-e", ExportHtml, workspace),

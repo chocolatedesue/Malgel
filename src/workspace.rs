@@ -46,7 +46,7 @@ use crate::{
     actions::*,
     analysis::{Analysis, content_hash},
     default_app, diagram_viewer,
-    document::{self, LineEnding, display_name, is_markdown_path},
+    document::{self, LineEnding, display_name},
     document_view::{DocumentEvent, DocumentView},
     docx, export,
     file_tree::{FileTree, FileTreeEvent},
@@ -106,6 +106,7 @@ pub struct Workspace {
     documents: Vec<Entity<DocumentView>>,
     active: usize,
     headings: Entity<CommandState>,
+    recents: Entity<CommandState>,
     file_tree: Entity<FileTree>,
     app_menu_bar: Entity<AppMenuBar>,
 
@@ -133,7 +134,8 @@ impl Workspace {
     ) -> Self {
         let settings = AppSettings::get(cx).clone();
         let headings = cx.new(|cx| CommandState::new(window, cx));
-        let file_tree = cx.new(|cx| FileTree::new(cx));
+        let recents = cx.new(|cx| CommandState::new(window, cx));
+        let file_tree = cx.new(FileTree::new);
 
         let subscriptions = vec![
             cx.subscribe_in(
@@ -179,6 +181,7 @@ impl Workspace {
             documents: Vec::new(),
             active: 0,
             headings,
+            recents,
             file_tree,
             app_menu_bar,
             window_title: String::new(),
@@ -854,9 +857,7 @@ impl Workspace {
         // fall through to the next most recent entry so the shortcut always
         // moves somewhere (repeated presses toggle between the two latest).
         let mut path = path;
-        if action.0 == 0
-            && path.is_file()
-            && self.active_document().read(cx).path() == Some(&path)
+        if action.0 == 0 && path.is_file() && self.active_document().read(cx).path() == Some(&path)
         {
             let Some(next) = settings.recent_files.get(1).cloned() else {
                 return;
@@ -928,6 +929,74 @@ impl Workspace {
                 });
             let _ = spawned;
         }
+    }
+
+    /// Show the recent files list (LRU) in a searchable dialog and open the
+    /// picked file.
+    fn show_recent_files(
+        &mut self,
+        _: &ShowRecentFiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        self.recents
+            .update(cx, |state, cx| state.set_query("", window, cx));
+        let recents = self.recents.clone();
+        let recent_files = AppSettings::get(cx).recent_files.clone();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let focus = recents.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+            let items = recent_files.iter().map(|path| {
+                let name = display_name(Some(path));
+                let keywords = [SharedString::from(path.to_string_lossy().to_string())];
+                let icon = if path.is_dir() {
+                    IconName::Folder
+                } else {
+                    IconName::FileText
+                };
+                CommandItem::new()
+                    .label(name)
+                    .keywords(keywords)
+                    .icon(Icon::new(icon))
+            });
+            let paths = recent_files.clone();
+            dialog.close_button(false).p_0().child(
+                Command::new(&recents)
+                    .bordered(false)
+                    .placeholder("Open recent")
+                    .max_h(rems(24.))
+                    .items(items)
+                    .empty(|_, _, _| "No recent files")
+                    .on_confirm(move |index: IndexPath, window, cx| {
+                        window.close_dialog(cx);
+                        let Some(path) = paths.get(index.row) else {
+                            return;
+                        };
+                        window.dispatch_action(Box::new(OpenRecentPath(path.clone())), cx);
+                    })
+                    .on_cancel(|window, cx| window.close_dialog(cx)),
+            )
+        });
+    }
+
+    fn open_recent_path(
+        &mut self,
+        action: &OpenRecentPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = action.0.clone();
+        if path.is_dir() {
+            AppSettings::update(cx, |settings| settings.push_recent(&path));
+            self.file_tree
+                .update(cx, |tree, cx| tree.set_root(Some(path), cx));
+            self.sync_file_tree(cx);
+            return;
+        }
+        self.open_paths(vec![path], window, cx);
     }
 
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -1543,15 +1612,15 @@ impl Workspace {
         }
     }
 
-fn is_image_path(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some(ext) if matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif"
+    fn is_image_path(path: &Path) -> bool {
+        matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some(ext) if matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif"
+            )
         )
-    )
-}
+    }
 
     fn on_drop_paths(
         &mut self,
@@ -2743,6 +2812,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_file))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::open_recent))
+            .on_action(cx.listener(Self::show_recent_files))
+            .on_action(cx.listener(Self::open_recent_path))
             .on_action(cx.listener(Self::follow_link))
             .on_action(cx.listener(Self::view_diagram))
             .on_action(cx.listener(Self::open_folder))

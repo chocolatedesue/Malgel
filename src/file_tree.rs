@@ -28,9 +28,8 @@ use gpui_kit::{
 
 use crate::actions::OpenFolder;
 
-/// Folders never worth showing: tool caches and dependencies.
-
-/// Entries hidden by default, matching VS Code's `files.exclude`.
+/// Folders never worth showing: tool caches and dependencies. Entries
+/// hidden by default, matching VS Code's `files.exclude`.
 const DEFAULT_EXCLUDED: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +65,7 @@ impl EventEmitter<FileTreeEvent> for FileTree {}
 
 impl FileTree {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let mut this = Self {
+        let this = Self {
             root: None,
             expanded: HashSet::new(),
             listings: HashMap::new(),
@@ -155,9 +154,7 @@ impl FileTree {
         let listing = cx.background_executor().spawn(async move {
             folders
                 .into_iter()
-                .filter_map(|folder| {
-                    list(&folder, show_hidden).map(|entries| (folder, entries))
-                })
+                .filter_map(|folder| list(&folder, show_hidden).map(|entries| (folder, entries)))
                 .collect::<HashMap<_, _>>()
         });
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
@@ -411,8 +408,11 @@ mod tests {
         ] {
             std::fs::write(dir.join(file), "").unwrap();
         }
-        let names: Vec<String> =
-            list(&dir, false).unwrap().into_iter().map(|e| e.name).collect();
+        let names: Vec<String> = list(&dir, false)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         assert_eq!(
             names,
             [
@@ -425,8 +425,11 @@ mod tests {
                 "Zed.md"
             ]
         );
-        let all: Vec<String> =
-            list(&dir, true).unwrap().into_iter().map(|e| e.name).collect();
+        let all: Vec<String> = list(&dir, true)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         assert!(all.contains(&".git".to_string()));
         let _ = std::fs::remove_dir_all(dir);
     }

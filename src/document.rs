@@ -93,18 +93,6 @@ pub fn save(path: &Path, text: &str, line_ending: LineEnding) -> io::Result<()> 
     result
 }
 
-/// Whether `path` looks like a Markdown document.
-pub fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "md" | "markdown" | "mdown" | "mkd" | "mkdn" | "mdx" | "txt"
-            )
-        })
-}
-
 /// Whether `path` is a PDF document.
 #[allow(dead_code)]
 pub fn is_pdf_path(path: &Path) -> bool {
@@ -151,10 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_markdown_extensions() {
-        assert!(is_markdown_path(Path::new("README.md")));
-        assert!(is_markdown_path(Path::new("notes.MARKDOWN")));
-        assert!(!is_markdown_path(Path::new("image.png")));
+    fn recognizes_untitled() {
         assert_eq!(display_name(None), "Untitled");
     }
 

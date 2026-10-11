@@ -97,6 +97,8 @@ Windows, the Malgel menu on macOS) or the View menu:
 
 - **Tabs.** Open documents side by side; Ctrl+Tab and Ctrl+Shift+Tab switch
   between them. Without tabs, opening a file replaces the current one.
+- **Recent files** (Ctrl+R). A searchable palette of the files you opened
+  lately, most recent first; pick one to open it.
 - **File sidebar** (Ctrl+Shift+B). A folder's Markdown and text files as a
   tree that follows changes on disk; File → Open folder… picks the folder.
 - **Outline** (Ctrl+Alt+O). The document's headings beside the editor, with
