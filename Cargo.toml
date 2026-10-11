@@ -10,8 +10,8 @@ publish = false
 
 [dependencies]
 # Force rust-embed to embed at compile time even with debug-assertions on
-# (the windows shader fix turns debug_assertions on in release, which would
-# otherwise make gpui-kit assets load from the build machine at runtime).
+# (dev builds, and cross-builds that ask for them, would otherwise make
+# gpui-kit assets load from the build machine at runtime).
 rust-embed = { version = "8.12.0", features = ["debug-embed"] }
 
 log = "0.4"
@@ -121,9 +121,15 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Keep debug-assertions off here: gpui-pre-windows only compiles its shaders
+# at build time (fxc) in a release without them, and with them on it reads the
+# HLSL from CARGO_MANIFEST_DIR at runtime — a build-machine path, so the exe
+# dies in DirectWrite init on every other machine. A Linux cross-build has no
+# fxc and needs the runtime path: add
+# `--config profile.release.debug-assertions=true` to that cargo invocation
+# only, and treat the result as unshippable.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 opt-level = 3
-debug-assertions = true
 strip = true
