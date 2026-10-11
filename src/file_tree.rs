@@ -26,10 +26,9 @@ use gpui_kit::{
     px, uniform_list,
 };
 
-use crate::{actions::OpenFolder, document::is_markdown_path};
+use crate::actions::OpenFolder;
 
 /// Folders never worth showing: tool caches and dependencies.
-const SKIPPED_FOLDERS: &[&str] = &["node_modules", "target", "__pycache__", "venv", "dist"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
@@ -352,18 +351,12 @@ fn list(folder: &Path) -> Option<Vec<Entry>> {
         .flatten()
         .filter_map(|item| {
             let name = item.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                return None;
-            }
             let path = item.path();
             // Follow links, so linked folders and files show as what they point to.
             let is_dir = path.is_dir();
-            let keep = if is_dir {
-                !SKIPPED_FOLDERS.contains(&name.as_str())
-            } else {
-                is_markdown_path(&path) || crate::document::is_pdf_path(&path)
-            };
-            keep.then_some(Entry { name, path, is_dir })
+            // Show everything, the way VS Code does: dotfiles, every
+            // extension, dependency folders. Nothing is filtered here.
+            Some(Entry { name, path, is_dir })
         })
         .collect();
     entries.sort_by(|a, b| {
@@ -379,7 +372,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lists_folders_first_and_only_documents() {
+    fn lists_folders_first_and_everything_else() {
         let dir = std::env::temp_dir().join(format!("malgel-tree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for folder in ["b-notes", "node_modules", ".git"] {
@@ -395,7 +388,19 @@ mod tests {
             std::fs::write(dir.join(file), "").unwrap();
         }
         let names: Vec<String> = list(&dir).unwrap().into_iter().map(|e| e.name).collect();
-        assert_eq!(names, ["b-notes", "alpha.markdown", "todo.txt", "Zed.md"]);
+        assert_eq!(
+            names,
+            [
+                ".git",
+                "b-notes",
+                "node_modules",
+                ".hidden.md",
+                "alpha.markdown",
+                "image.png",
+                "todo.txt",
+                "Zed.md"
+            ]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }
