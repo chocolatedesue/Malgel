@@ -129,10 +129,20 @@ same setup:
   extend past the visible area). Diagnosis: pane width overflow in the
   workspace layout for PDF-backed views; fix pending.
 
+## 7. Open Recent (LRU, Ctrl+R)
+
+- `Ctrl+R` opens the most recent entry; when that is the active document
+  it falls through to the next one, so repeated presses toggle between
+  the two latest files. Reopened folders become the sidebar root.
+- Opening a folder (CLI argument, second launch, or the folder dialog)
+  records it in the same LRU list (limit 10).
+- The File menu already exposed the list as "Open recent"; the
+  shortcut and folder entries close the gap. Verified on Windows: the
+  LRU order in settings.json, and a real Ctrl+R toggling between the
+  two latest documents.
+
 ## Planned follow-ups
 
-- **Open Recent** (LRU list of recent files/folders, reopen action,
-  `Ctrl+R`).
 - Integrated terminal panel (embedded PTY) as the in-app counterpart of
   the terminal-summon hotkey.
 
