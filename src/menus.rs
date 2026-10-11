@@ -292,7 +292,10 @@ mod tests {
                     _ => String::new(),
                 })
                 .collect();
-            assert_eq!(checked, ["Preview", "Tabs", "Sync scrolling", "Line numbers"]);
+            assert_eq!(
+                checked,
+                ["Preview", "Tabs", "Sync scrolling", "Line numbers"]
+            );
         });
     }
 

@@ -13,13 +13,12 @@ use std::{
 };
 
 use gpui_kit::{
-    Anchor,
-    base::Disableable as _,
-    App, AppContext as _, Bounds, Context, Entity, EntityId, ExternalPaths, FocusHandle, Focusable,
-    FontWeight, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
+    Anchor, App, AppContext as _, Bounds, Context, Entity, EntityId, ExternalPaths, FocusHandle,
+    Focusable, FontWeight, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
     PathPromptOptions, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, WindowBounds,
     assets::IconName,
+    base::Disableable as _,
     component::{
         ActiveTheme as _, Icon, IndexPath, Selectable as _, Sizable as _, TitleBar, WindowExt as _,
         button::{Button, ButtonGroup, ButtonVariants as _},
@@ -484,9 +483,7 @@ impl Workspace {
             match result {
                 Ok(pages) => {
                     AppSettings::update(cx, |settings| settings.push_recent(&path));
-                    let doc = cx.new(|cx| {
-                        DocumentView::new_pdf(path.clone(), pages, window, cx)
-                    });
+                    let doc = cx.new(|cx| DocumentView::new_pdf(path.clone(), pages, window, cx));
                     let active = self.active_document().read(cx);
                     let replace = active.is_blank()
                         || match placement {
@@ -505,7 +502,10 @@ impl Workspace {
                         settings.recent_files.retain(|recent| recent != &path)
                     });
                     self.notify_error(
-                        format!("Couldn’t open “{}”. {err}", document::display_name(Some(&path))),
+                        format!(
+                            "Couldn’t open “{}”. {err}",
+                            document::display_name(Some(&path))
+                        ),
                         window,
                         cx,
                     );
@@ -899,7 +899,11 @@ impl Workspace {
             let spawned = std::process::Command::new("x-terminal-emulator")
                 .current_dir(&dir)
                 .spawn()
-                .or_else(|_| std::process::Command::new("xterm").current_dir(&dir).spawn());
+                .or_else(|_| {
+                    std::process::Command::new("xterm")
+                        .current_dir(&dir)
+                        .spawn()
+                });
             let _ = spawned;
         }
     }
@@ -1022,12 +1026,7 @@ impl Workspace {
         match pending {
             Some((ix, doc)) => {
                 self.activate(ix, window, cx);
-                self.confirm_unsaved(
-                    doc,
-                    AfterConfirm::CloseDocuments(valid_targets),
-                    window,
-                    cx,
-                );
+                self.confirm_unsaved(doc, AfterConfirm::CloseDocuments(valid_targets), window, cx);
             }
             None => {
                 for id in valid_targets {
@@ -1226,7 +1225,9 @@ impl Workspace {
                         .and_then(|dir| path.strip_prefix(dir).ok())
                         .unwrap_or(&path);
                     self.notify_error(format!("Couldn’t find “{}”.", shown.display()), window, cx);
-                } else if path.is_file() && (is_markdown_path(&path) || document::is_pdf_path(&path)) {
+                } else if path.is_file()
+                    && (is_markdown_path(&path) || document::is_pdf_path(&path))
+                {
                     let mut new_tab = AppSettings::get(cx).open_links_in == LinkPlacement::NewTab;
                     if action.alternate {
                         new_tab = !new_tab;
@@ -1863,10 +1864,7 @@ impl Workspace {
                                     .hover(|style| style.bg(theme.list_active))
                                     .child(div().when(dirty, |this| {
                                         this.child(
-                                            div()
-                                                .size(px(7.))
-                                                .rounded_full()
-                                                .bg(theme.primary),
+                                            div().size(px(7.)).rounded_full().bg(theme.primary),
                                         )
                                         .group_hover("tab", |style| style.invisible())
                                     }))
@@ -1921,21 +1919,19 @@ impl Workspace {
                                     let ws_right = ws.clone();
                                     let doc = doc_weak.clone();
 
-                                    menu.item(
-                                        PopupMenuItem::new("Close").on_click(
-                                            move |_, window, cx| {
-                                                _ = ws_close.update(cx, |this, cx| {
-                                                    let id = doc.entity_id();
-                                                    this.confirm_unsaved(
-                                                        doc.clone(),
-                                                        AfterConfirm::CloseDocument(id),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            },
-                                        ),
-                                    )
+                                    menu.item(PopupMenuItem::new("Close").on_click(
+                                        move |_, window, cx| {
+                                            _ = ws_close.update(cx, |this, cx| {
+                                                let id = doc.entity_id();
+                                                this.confirm_unsaved(
+                                                    doc.clone(),
+                                                    AfterConfirm::CloseDocument(id),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ))
                                     .item(
                                         PopupMenuItem::new("Close Other Tabs")
                                             .disabled(!has_other)
@@ -1999,16 +1995,14 @@ impl Workspace {
                         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                             let ws_other = ws.clone();
                             let ws_right = ws.clone();
-                            menu.item(
-                                PopupMenuItem::new("Close Other Tabs").on_click(
-                                    move |_, window, cx| {
-                                        _ = ws_other.update(cx, |this, cx| {
-                                            let keep_id = this.active_document().entity_id();
-                                            this.close_other_tabs_by_id(keep_id, window, cx);
-                                        });
-                                    },
-                                ),
-                            )
+                            menu.item(PopupMenuItem::new("Close Other Tabs").on_click(
+                                move |_, window, cx| {
+                                    _ = ws_other.update(cx, |this, cx| {
+                                        let keep_id = this.active_document().entity_id();
+                                        this.close_other_tabs_by_id(keep_id, window, cx);
+                                    });
+                                },
+                            ))
                             .item(
                                 PopupMenuItem::new("Close Tabs to the Right").on_click(
                                     move |_, window, cx| {
@@ -2748,9 +2742,7 @@ impl Render for Workspace {
                     cx,
                 )
             }))
-            .on_action(cx.listener(|this, _: &SummonTerminal, _, cx| {
-                this.summon_terminal(cx)
-            }))
+            .on_action(cx.listener(|this, _: &SummonTerminal, _, cx| this.summon_terminal(cx)))
             .on_action(cx.listener(|this, _: &ToggleTabs, _, cx| {
                 this.toggle(|settings| settings.tabs = !settings.tabs, cx)
             }))

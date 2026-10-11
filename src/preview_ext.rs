@@ -58,9 +58,7 @@ pub fn markdown_extensions(preview: &gpui_kit::Entity<TextViewState>) -> Markdow
         body_extensions: with_math(MarkdownExtensions::default()),
     };
     let tabs = TabsPlugin {
-        content_extensions: with_math(
-            MarkdownExtensions::default().plugin(alert.clone()),
-        ),
+        content_extensions: with_math(MarkdownExtensions::default().plugin(alert.clone())),
         state: tabs_state,
     };
     with_math(
@@ -628,7 +626,11 @@ impl MarkdownPlugin for TabsPlugin {
         let tab_bar = TabBar::new(SharedString::from(format!("tab-bar-{block_id}")))
             .underline()
             .selected_index(active_index)
-            .children(data.tabs.iter().map(|tab| Tab::new().label(tab.title.clone())))
+            .children(
+                data.tabs
+                    .iter()
+                    .map(|tab| Tab::new().label(tab.title.clone())),
+            )
             .suffix(copy_button)
             .on_click(move |&new_idx, _window, cx| {
                 state.set_active(block_id, new_idx, cx);
@@ -1254,7 +1256,6 @@ mod tests {
         assert_eq!(hex_over(gpui_kit::rgb(0x0969da).into(), black), "#0969da");
     }
 
-
     #[test]
     fn normalizes_multitab_container() {
         let src = "intro\n\n:::tabs\n@tab A\nbody a\n\n@tab B\nbody b\n:::\n\nafter\n";
@@ -1265,7 +1266,12 @@ mod tests {
         assert!(out.contains("body b"));
         assert!(!out.contains(":::tabs"));
         let (tabs, _) = parse_tabs_body(
-            out.split("````tabs\n").nth(1).unwrap().split("````\n").next().unwrap(),
+            out.split("````tabs\n")
+                .nth(1)
+                .unwrap()
+                .split("````\n")
+                .next()
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(tabs.len(), 2);
@@ -1276,7 +1282,12 @@ mod tests {
         let src = ":::tabs\n@tab A\n```bash\nrun a\n```\n\n@tab B\nbody\n:::\n";
         let out = normalize_tab_containers(src);
         let (tabs, _) = parse_tabs_body(
-            out.split("````tabs\n").nth(1).unwrap().split("````\n").next().unwrap(),
+            out.split("````tabs\n")
+                .nth(1)
+                .unwrap()
+                .split("````\n")
+                .next()
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(tabs.len(), 2);
