@@ -11,9 +11,9 @@ use std::{
 };
 
 use gpui_kit::{
-    Context, EventEmitter, ExternalPaths, FontWeight, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Render, SharedString, Styled as _, Task,
-    UniformListScrollHandle, Window,
+    AppContext as _, Context, EventEmitter, ExternalPaths, FontWeight, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Task, UniformListScrollHandle, Window,
     assets::IconName,
     component::{
         ActiveTheme as _, Icon, Sizable as _,
@@ -26,6 +26,8 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px, uniform_list,
 };
+
+use crate::workspace::DragGhost;
 
 use crate::actions::OpenFolder;
 
@@ -51,6 +53,18 @@ pub enum FileTreeEvent {
         copied: usize,
         failed: usize,
     },
+    /// An entry (and everything below it) was moved within the tree.
+    Moved {
+        from: PathBuf,
+        to: PathBuf,
+    },
+}
+
+/// A file or folder being dragged inside the tree, to move it the way
+/// VS Code moves entries within the explorer.
+#[derive(Clone)]
+pub struct TreeDrag {
+    pub path: PathBuf,
 }
 
 pub struct FileTree {
@@ -248,6 +262,51 @@ impl FileTree {
         }
     }
 
+    /// A tree entry dropped on empty space moves into the root folder.
+    fn move_into_root(&mut self, source: &Path, cx: &mut Context<Self>) {
+        match self.root.clone() {
+            Some(root) => self.move_entry(source, &root, cx),
+            None => cx.emit(FileTreeEvent::Copied {
+                copied: 0,
+                failed: 1,
+            }),
+        }
+    }
+
+    /// Move a tree entry into `target_dir` (VS Code moves entries dragged
+    /// within the explorer), then re-list and report the outcome.
+    fn move_entry(&mut self, source: &Path, target_dir: &Path, cx: &mut Context<Self>) {
+        let Some(name) = source.file_name() else {
+            return;
+        };
+        let dest = target_dir.join(name);
+        if source == dest || source.parent() == Some(target_dir) {
+            // Already there: nothing to do, as in VS Code.
+            return;
+        }
+        // A folder can't go inside itself or one of its descendants.
+        if source.is_dir() && target_dir.starts_with(source) {
+            cx.emit(FileTreeEvent::Copied {
+                copied: 0,
+                failed: 1,
+            });
+            return;
+        }
+        match move_path(source, &dest) {
+            Ok(()) => {
+                self.refresh(cx);
+                cx.emit(FileTreeEvent::Moved {
+                    from: source.to_path_buf(),
+                    to: dest,
+                });
+            }
+            Err(_) => cx.emit(FileTreeEvent::Copied {
+                copied: 0,
+                failed: 1,
+            }),
+        }
+    }
+
     fn render_rows(
         &mut self,
         range: Range<usize>,
@@ -270,6 +329,7 @@ impl FileTree {
                 };
                 let path = entry.path.clone();
                 let drop_path = entry.path.clone();
+                let drag_name = entry.name.clone();
                 Some(
                     h_flex()
                         .id(ix)
@@ -284,6 +344,13 @@ impl FileTree {
                             this.bg(active_bg).font_weight(FontWeight::MEDIUM)
                         })
                         .when(!is_active, |this| this.hover(move |style| style.bg(hover)))
+                        // Entries drag within the tree to move, the way
+                        // VS Code's explorer does.
+                        .on_drag(TreeDrag { path: path.clone() }, move |_, _, _, cx| {
+                            cx.new(|_| DragGhost {
+                                label: drag_name.clone().into(),
+                            })
+                        })
                         .child(div().w(px(12.)).flex_none().when(entry.is_dir, |this| {
                             this.child(
                                 Icon::new(if expanded {
@@ -311,13 +378,21 @@ impl FileTree {
                                 }
                             }),
                         )
-                        // A drop on a folder copies the files into it.
+                        // A drop on a folder copies an OS drop into it, and
+                        // moves a tree entry into it.
                         .when(entry.is_dir, |this| {
                             let folder = drop_path.clone();
+                            let folder_for_move = folder.clone();
                             this.on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                                 this.copy_paths_into(&folder, paths, cx)
                             }))
-                            .drag_over::<ExternalPaths>(
+                            .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                                style.bg(cx.theme().drop_target)
+                            })
+                            .on_drop(cx.listener(move |this, drag: &TreeDrag, _, cx| {
+                                this.move_entry(&drag.path, &folder_for_move, cx)
+                            }))
+                            .drag_over::<TreeDrag>(
                                 |style, _, _, cx| style.bg(cx.theme().drop_target),
                             )
                         })
@@ -407,8 +482,32 @@ impl Render for FileTree {
                 cx.listener(|this, paths: &ExternalPaths, _, cx| this.drop_into_root(paths, cx)),
             )
             .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+            .on_drop(
+                cx.listener(|this, drag: &TreeDrag, _, cx| this.move_into_root(&drag.path, cx)),
+            )
+            .drag_over::<TreeDrag>(|style, _, _, cx| style.bg(cx.theme().drop_target))
             .child(header)
             .child(body)
+    }
+}
+
+/// Move `source` to `dest`, falling back to copy + delete when the rename
+/// crosses filesystems.
+fn move_path(source: &Path, dest: &Path) -> std::io::Result<()> {
+    if std::fs::rename(source, dest).is_ok() {
+        return Ok(());
+    }
+    let target = dest.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination has no parent",
+        )
+    })?;
+    copy_entry(source, target)?;
+    if source.is_dir() {
+        std::fs::remove_dir_all(source)
+    } else {
+        std::fs::remove_file(source)
     }
 }
 
