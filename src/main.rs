@@ -14,6 +14,7 @@ mod docx;
 mod export;
 mod file_tree;
 mod format;
+mod image_view;
 mod images;
 mod links;
 mod math;

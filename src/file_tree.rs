@@ -11,8 +11,9 @@ use std::{
 };
 
 use gpui_kit::{
-    Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Render, SharedString, Styled as _, Task, UniformListScrollHandle, Window,
+    Context, EventEmitter, ExternalPaths, FontWeight, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, Render, SharedString, Styled as _, Task,
+    UniformListScrollHandle, Window,
     assets::IconName,
     component::{
         ActiveTheme as _, Icon, Sizable as _,
@@ -45,6 +46,11 @@ struct Row {
 
 pub enum FileTreeEvent {
     Open(PathBuf),
+    /// Files dropped onto the tree were copied into a folder.
+    Copied {
+        copied: usize,
+        failed: usize,
+    },
 }
 
 pub struct FileTree {
@@ -214,6 +220,34 @@ impl FileTree {
         cx.notify();
     }
 
+    /// Copy the dropped paths into `target` (VS Code copies an OS drop into
+    /// the folder it lands on), then re-list and report the outcome.
+    fn copy_paths_into(&mut self, target: &Path, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        let (mut copied, mut failed) = (0usize, 0usize);
+        for src in paths.paths() {
+            match copy_entry(src, target) {
+                Ok(()) => copied += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        if copied > 0 {
+            self.refresh(cx);
+        }
+        cx.notify();
+        cx.emit(FileTreeEvent::Copied { copied, failed });
+    }
+
+    /// A drop on the tree's empty space lands in the root folder.
+    fn drop_into_root(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        match self.root.clone() {
+            Some(root) => self.copy_paths_into(&root, paths, cx),
+            None => cx.emit(FileTreeEvent::Copied {
+                copied: 0,
+                failed: paths.paths().len(),
+            }),
+        }
+    }
+
     fn render_rows(
         &mut self,
         range: Range<usize>,
@@ -235,6 +269,7 @@ impl FileTree {
                     (false, _) => IconName::FileText,
                 };
                 let path = entry.path.clone();
+                let drop_path = entry.path.clone();
                 Some(
                     h_flex()
                         .id(ix)
@@ -276,6 +311,16 @@ impl FileTree {
                                 }
                             }),
                         )
+                        // A drop on a folder copies the files into it.
+                        .when(entry.is_dir, |this| {
+                            let folder = drop_path.clone();
+                            this.on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                                this.copy_paths_into(&folder, paths, cx)
+                            }))
+                            .drag_over::<ExternalPaths>(
+                                |style, _, _, cx| style.bg(cx.theme().drop_target),
+                            )
+                        })
                         .into_any_element(),
                 )
             })
@@ -358,9 +403,51 @@ impl Render for FileTree {
             .id("file-tree")
             .size_full()
             .bg(theme.sidebar)
+            .on_drop(
+                cx.listener(|this, paths: &ExternalPaths, _, cx| this.drop_into_root(paths, cx)),
+            )
+            .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().drop_target))
             .child(header)
             .child(body)
     }
+}
+
+/// Copy `src` into the `target` folder, recursing into directories.
+fn copy_entry(src: &Path, target: &Path) -> std::io::Result<()> {
+    let name = src.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+    })?;
+    let dst = target.join(name);
+    if src == dst {
+        return Ok(());
+    }
+    if src.is_dir() {
+        // Copying a folder into itself (or a folder below it) would recurse.
+        if target.starts_with(src) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot copy a folder into itself",
+            ));
+        }
+        copy_dir_all(src, &dst)
+    } else {
+        std::fs::copy(src, &dst).map(|_| ())
+    }
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dst = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_all(&path, &dst)?;
+        } else {
+            std::fs::copy(&path, &dst)?;
+        }
+    }
+    Ok(())
 }
 
 /// A folder's subfolders and Markdown files, folders first, by name.

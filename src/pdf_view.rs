@@ -1,29 +1,32 @@
 //! PDF viewing support: renders PDF documents using Hayro and GPUI.
 //!
-//! PDF pages are loaded using `hayro_interpret::hayro_syntax::Pdf` and converted
-//! into crisp SVG representations with `hayro_svg::convert`. Each page is rendered
-//! as a clean sheet with shadow and border, complete with zoom controls and page numbering.
+//! Pages are parsed with `hayro_interpret::hayro_syntax::Pdf` and turned into
+//! crisp SVG sheets with `hayro_svg::convert` **on demand**: only the pages in
+//! view are rendered, and rendered pages are cached, so long documents open
+//! and scroll smoothly. The viewer is one continuous vertical scroll with
+//! fit-width / fit-page / custom zoom and page navigation.
 
 use std::{
+    collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
 };
 
 use gpui_kit::{
     App, Context, ElementId, FocusHandle, Focusable, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Window,
+    IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy, Size, Styled as _, Window,
     assets::IconName,
     base::Disableable as _,
     component::{
-        ActiveTheme as _, Icon, Sizable as _,
+        ActiveTheme as _, Icon, Sizable as _, VirtualListScrollHandle,
         button::{Button, ButtonVariants as _},
-        h_flex,
-        scroll::ScrollableElement as _,
-        v_flex,
+        h_flex, v_flex, v_virtual_list,
     },
     div, img,
     prelude::FluentBuilder as _,
-    px,
+    px, rgb,
 };
 
 use hayro_svg::{
@@ -39,17 +42,33 @@ use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
 
 /// Default zoom factor (100%).
 pub const DEFAULT_ZOOM: f32 = 1.0;
-/// Minimum allowed zoom (25%).
-pub const MIN_ZOOM: f32 = 0.25;
-/// Maximum allowed zoom (400%).
-pub const MAX_ZOOM: f32 = 4.0;
+/// Minimum allowed zoom (10%).
+pub const MIN_ZOOM: f32 = 0.1;
+/// Maximum allowed zoom (800%).
+pub const MAX_ZOOM: f32 = 8.0;
 /// Multiplier for zoom in / out steps.
 pub const ZOOM_STEP: f32 = 1.25;
 
-/// A single rendered page of a PDF document.
+/// Gap between pages, in logical pixels.
+const PAGE_GAP: f32 = 20.;
+/// Margin around the page column, in logical pixels.
+const PAGE_MARGIN: f32 = 24.;
+
+/// How the zoom factor is chosen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FitMode {
+    /// A user-set factor, from the zoom buttons.
+    Custom,
+    /// The widest page fills the viewport width.
+    Width,
+    /// The first page fills the viewport.
+    Page,
+}
+
+/// A page's fixed geometry, known without rendering it.
 #[derive(Clone)]
 pub struct PdfPage {
-    /// 0-indexed page number in document.
+    /// 0-indexed page number in the document.
     pub index: usize,
     /// 1-indexed human-readable page number.
     pub page_number: usize,
@@ -57,14 +76,19 @@ pub struct PdfPage {
     pub width: f32,
     /// Height in PDF points.
     pub height: f32,
-    /// Rendered SVG markup.
-    pub svg: String,
-    /// GPUI Image resource created from `svg`.
-    pub image: Arc<Image>,
+}
+
+/// A parsed PDF: its pages' geometry, plus lazily rendered SVGs.
+pub struct PdfDocument {
+    pdf: Pdf,
+    pages: Vec<PdfPage>,
+    rendered: HashMap<usize, Arc<Image>>,
+    interpreter_settings: InterpreterSettings,
+    render_settings: SvgRenderSettings,
 }
 
 /// Create default interpreter settings using Typst's bundled Foxit standard fonts.
-pub fn default_interpreter_settings() -> InterpreterSettings {
+fn default_interpreter_settings() -> InterpreterSettings {
     let select_standard_font = |font: StandardFont| -> Option<(FontData, u32)> {
         let bytes: &'static [u8] = match font {
             StandardFont::Helvetica => typst_assets::pdf::SANS,
@@ -96,54 +120,85 @@ pub fn default_interpreter_settings() -> InterpreterSettings {
     }
 }
 
-/// Render all pages of a PDF document from raw bytes.
-pub fn render_pdf_bytes(bytes: &[u8]) -> Result<Vec<PdfPage>, String> {
-    eprintln!("TRACE: render_pdf_bytes enter, {} bytes", bytes.len());
-    let pdf = Pdf::new(bytes.to_vec()).map_err(|e| {
-        eprintln!("TRACE: Pdf::new failed: {e:?}");
-        format!("Failed to parse PDF: {e:?}")
-    })?;
-    eprintln!("TRACE: Pdf::new ok, {} pages", pdf.pages().len());
-
-    let cache = RenderCache::new();
-    let interpreter_settings = default_interpreter_settings();
-    let render_settings = SvgRenderSettings {
-        bg_color: [255, 255, 255, 255],
-    };
-
-    let mut pages = Vec::with_capacity(pdf.pages().len());
-    for (index, page) in pdf.pages().iter().enumerate() {
-        let (width, height) = page.render_dimensions();
-        let svg = convert(page, &cache, &interpreter_settings, &render_settings);
-        eprintln!("TRACE: page {} svg {} bytes", index, svg.len());
-        let image = Arc::new(Image::from_bytes(ImageFormat::Svg, svg.as_bytes().to_vec()));
-        pages.push(PdfPage {
-            index,
-            page_number: index + 1,
-            width,
-            height,
-            svg,
-            image,
-        });
+impl PdfDocument {
+    /// Parse `bytes` into a document. Pages are measured now and rendered
+    /// lazily, so a long document is cheap to open.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
+        let pdf = Pdf::new(bytes).map_err(|err| format!("Failed to parse PDF: {err:?}"))?;
+        let pages = pdf
+            .pages()
+            .iter()
+            .enumerate()
+            .map(|(index, page)| {
+                let (width, height) = page.render_dimensions();
+                PdfPage {
+                    index,
+                    page_number: index + 1,
+                    width,
+                    height,
+                }
+            })
+            .collect();
+        Ok(Self {
+            pdf,
+            pages,
+            rendered: HashMap::new(),
+            interpreter_settings: default_interpreter_settings(),
+            render_settings: SvgRenderSettings {
+                bg_color: [255, 255, 255, 255],
+            },
+        })
     }
 
-    eprintln!("TRACE: render done, {} pages", pages.len());
-    Ok(pages)
+    /// The page geometry, in document order.
+    pub fn pages(&self) -> &[PdfPage] {
+        &self.pages
+    }
+
+    /// Total number of pages.
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// The rendered SVG image for page `index`, rendering and caching it the
+    /// first time it is asked for.
+    fn image(&mut self, index: usize) -> Option<Arc<Image>> {
+        if let Some(image) = self.rendered.get(&index) {
+            return Some(image.clone());
+        }
+        let page = self.pdf.pages().get(index)?;
+        let cache = RenderCache::new();
+        let svg = convert(
+            page,
+            &cache,
+            &self.interpreter_settings,
+            &self.render_settings,
+        );
+        let image = Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()));
+        self.rendered.insert(index, image.clone());
+        Some(image)
+    }
 }
 
 /// A GPUI view displaying a scrollable PDF document.
 pub struct PdfView {
     path: Option<PathBuf>,
     title: String,
-    pages: Vec<PdfPage>,
+    doc: Option<PdfDocument>,
+    fit: FitMode,
+    /// The factor actually used, kept in sync each frame for the toolbar.
     zoom: f32,
+    /// The user's factor, used when `fit` is [`FitMode::Custom`].
+    custom_zoom: f32,
+    /// The page currently at the top of the viewport.
+    current_page: usize,
+    scroll: VirtualListScrollHandle,
     focus_handle: FocusHandle,
-    error: Option<String>,
 }
 
 impl PdfView {
-    /// Create a `PdfView` from already rendered pages.
-    pub fn new(path: Option<PathBuf>, pages: Vec<PdfPage>, cx: &mut Context<Self>) -> Self {
+    /// Create a `PdfView` from a parsed document.
+    pub fn new(path: Option<PathBuf>, doc: PdfDocument, cx: &mut Context<Self>) -> Self {
         let title = path
             .as_ref()
             .and_then(|p| p.file_name())
@@ -153,46 +208,14 @@ impl PdfView {
         Self {
             path,
             title,
-            pages,
+            doc: Some(doc),
+            fit: FitMode::Custom,
             zoom: DEFAULT_ZOOM,
+            custom_zoom: DEFAULT_ZOOM,
+            current_page: 0,
+            scroll: VirtualListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
-            error: None,
         }
-    }
-
-    /// Create a `PdfView` in an error state.
-    pub fn new_with_error(error: String, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
-        let title = path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "PDF Document".to_string());
-
-        Self {
-            path,
-            title,
-            pages: Vec::new(),
-            zoom: DEFAULT_ZOOM,
-            focus_handle: cx.focus_handle(),
-            error: Some(error),
-        }
-    }
-
-    /// Load and render a PDF document from raw bytes.
-    pub fn from_bytes(
-        bytes: &[u8],
-        path: Option<PathBuf>,
-        cx: &mut Context<Self>,
-    ) -> Result<Self, String> {
-        let pages = render_pdf_bytes(bytes)?;
-        Ok(Self::new(path, pages, cx))
-    }
-
-    /// Open and render a PDF document from a file path.
-    pub fn from_path(path: impl AsRef<Path>, cx: &mut Context<Self>) -> Result<Self, String> {
-        let path = path.as_ref().to_path_buf();
-        let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read file: {e}"))?;
-        Self::from_bytes(&bytes, Some(path), cx)
     }
 
     /// The path of the open document, if opened from disk.
@@ -205,19 +228,19 @@ impl PdfView {
         &self.title
     }
 
-    /// All rendered pages in the document.
-    pub fn pages(&self) -> &[PdfPage] {
-        &self.pages
-    }
-
     /// Total number of pages.
     pub fn page_count(&self) -> usize {
-        self.pages.len()
+        self.doc.as_ref().map_or(0, PdfDocument::page_count)
     }
 
     /// Current zoom level.
     pub fn zoom(&self) -> f32 {
         self.zoom
+    }
+
+    /// The zoom mode in effect.
+    pub fn fit_mode(&self) -> FitMode {
+        self.fit
     }
 
     /// Zoom in by one step.
@@ -235,24 +258,74 @@ impl PdfView {
         self.set_zoom(DEFAULT_ZOOM, cx);
     }
 
-    /// Set an explicit zoom factor, clamped between `MIN_ZOOM` and `MAX_ZOOM`.
+    /// Set an explicit zoom factor, switching to custom zoom.
     pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
         let clamped = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-        if (self.zoom - clamped).abs() > f32::EPSILON {
+        if self.fit != FitMode::Custom || (self.custom_zoom - clamped).abs() > f32::EPSILON {
+            self.fit = FitMode::Custom;
+            self.custom_zoom = clamped;
             self.zoom = clamped;
             cx.notify();
         }
     }
 
-    /// The error message, if document loading or parsing failed.
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+    /// Scale the widest page to the viewport width.
+    pub fn fit_width(&mut self, cx: &mut Context<Self>) {
+        if self.fit != FitMode::Width {
+            self.fit = FitMode::Width;
+            cx.notify();
+        }
+    }
+
+    /// Scale the first page to fit the viewport.
+    pub fn fit_page(&mut self, cx: &mut Context<Self>) {
+        if self.fit != FitMode::Page {
+            self.fit = FitMode::Page;
+            cx.notify();
+        }
+    }
+
+    /// Scroll so page `index` (0-based) is at the top.
+    pub fn go_to_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        let count = self.page_count();
+        if count == 0 {
+            return;
+        }
+        let index = index.min(count - 1);
+        self.current_page = index;
+        self.scroll.scroll_to_item(index, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// The zoom factor a fit mode resolves to for a given viewport.
+    fn resolved_zoom(&self, viewport: Size<Pixels>) -> f32 {
+        let Some(doc) = &self.doc else {
+            return DEFAULT_ZOOM;
+        };
+        if doc.pages.is_empty() {
+            return DEFAULT_ZOOM;
+        }
+        let avail_width = (viewport.width.as_f32() - 2. * PAGE_MARGIN - 12.).max(1.);
+        let avail_height = (viewport.height.as_f32() - 2. * PAGE_MARGIN).max(1.);
+        match self.fit {
+            FitMode::Custom => self.custom_zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+            FitMode::Width => {
+                let widest = doc.pages.iter().fold(1.0f32, |w, p| w.max(p.width));
+                (avail_width / widest).clamp(MIN_ZOOM, MAX_ZOOM)
+            }
+            FitMode::Page => {
+                let page = &doc.pages[0];
+                let scale = (avail_width / page.width).min(avail_height / page.height);
+                scale.clamp(MIN_ZOOM, MAX_ZOOM)
+            }
+        }
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let zoom_pct = format!("{:.0}%", self.zoom * 100.0);
-        let page_count = self.pages.len();
+        let total = self.page_count();
+        let current = (self.current_page + 1).min(total.max(1));
 
         h_flex()
             .id("pdf-toolbar")
@@ -280,13 +353,9 @@ impl PdfView {
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .child(self.title.clone()),
                     )
-                    .when(page_count > 0, |this| {
+                    .when(total > 0, |this| {
                         this.child(div().text_xs().text_color(theme.muted_foreground).child(
-                            format!(
-                                "({} {})",
-                                page_count,
-                                if page_count == 1 { "page" } else { "pages" }
-                            ),
+                            format!("({total} {})", if total == 1 { "page" } else { "pages" }),
                         ))
                     }),
             )
@@ -295,14 +364,26 @@ impl PdfView {
                     .gap_1()
                     .items_center()
                     .child(
-                        Button::new("pdf-zoom-out")
+                        Button::new("pdf-fit-width")
                             .ghost()
                             .small()
                             .compact()
-                            .icon(Icon::new(IconName::ZoomOut))
-                            .tooltip("Zoom out")
-                            .disabled(self.zoom <= MIN_ZOOM || self.pages.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom_out(cx))),
+                            .label("Fit width")
+                            .tooltip("Fit page width")
+                            .toggled(self.fit == FitMode::Width)
+                            .disabled(total == 0)
+                            .on_click(cx.listener(|this, _, _, cx| this.fit_width(cx))),
+                    )
+                    .child(
+                        Button::new("pdf-fit-page")
+                            .ghost()
+                            .small()
+                            .compact()
+                            .label("Fit page")
+                            .tooltip("Fit whole page")
+                            .toggled(self.fit == FitMode::Page)
+                            .disabled(total == 0)
+                            .on_click(cx.listener(|this, _, _, cx| this.fit_page(cx))),
                     )
                     .child(
                         Button::new("pdf-zoom-reset")
@@ -310,9 +391,20 @@ impl PdfView {
                             .small()
                             .compact()
                             .label(zoom_pct)
-                            .tooltip("Reset zoom (100%)")
-                            .disabled(self.pages.is_empty())
+                            .tooltip("Actual size (100%)")
+                            .toggled(self.fit == FitMode::Custom)
+                            .disabled(total == 0)
                             .on_click(cx.listener(|this, _, _, cx| this.reset_zoom(cx))),
+                    )
+                    .child(
+                        Button::new("pdf-zoom-out")
+                            .ghost()
+                            .small()
+                            .compact()
+                            .icon(Icon::new(IconName::ZoomOut))
+                            .tooltip("Zoom out")
+                            .disabled(total == 0 || self.zoom <= MIN_ZOOM)
+                            .on_click(cx.listener(|this, _, _, cx| this.zoom_out(cx))),
                     )
                     .child(
                         Button::new("pdf-zoom-in")
@@ -321,108 +413,158 @@ impl PdfView {
                             .compact()
                             .icon(Icon::new(IconName::ZoomIn))
                             .tooltip("Zoom in")
-                            .disabled(self.zoom >= MAX_ZOOM || self.pages.is_empty())
+                            .disabled(total == 0 || self.zoom >= MAX_ZOOM)
                             .on_click(cx.listener(|this, _, _, cx| this.zoom_in(cx))),
-                    ),
-            )
-    }
-
-    fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
-        if let Some(error) = &self.error {
-            return v_flex()
-                .id("pdf-error")
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .p_8()
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size_8()
-                        .text_color(theme.danger),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui_kit::FontWeight::MEDIUM)
-                        .child("Failed to load PDF"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(error.clone()),
-                )
-                .into_any_element();
-        }
-
-        if self.pages.is_empty() {
-            return v_flex()
-                .id("pdf-empty")
-                .size_full()
-                .items_center()
-                .justify_center()
-                .p_8()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child("This PDF has no pages.")
-                .into_any_element();
-        }
-
-        let total = self.pages.len();
-        let zoom = self.zoom;
-
-        v_flex()
-            .id("pdf-pages-scroll")
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .overflow_scrollbar()
-            // Wide pages must stay reachable even when the horizontal
-            // centering misbehaves on HiDPI/maximized windows.
-            .bg(theme.background)
-            .py_8()
-            .px_4()
-            .gap_8()
-            .items_center()
-            .children(self.pages.iter().map(|page| {
-                let width = px(page.width * zoom);
-                let height = px(page.height * zoom);
-                let page_num = page.page_number;
-
-                v_flex()
-                    .id(ElementId::NamedInteger(
-                        "pdf-page-wrapper".into(),
-                        page_num as u64,
-                    ))
-                    .items_center()
-                    .gap_2()
+                    )
+                    .child(div().w(px(1.)).h_4().bg(theme.border).mx_1())
                     .child(
-                        div()
-                            .id(ElementId::NamedInteger(
-                                "pdf-page-card".into(),
-                                page_num as u64,
-                            ))
-                            .max_w_full()
-                            .w(width)
-                            .h(height)
-                            .bg(gpui_kit::rgb(0xffffff))
-                            .border_1()
-                            .border_color(theme.border)
-                            .shadow_md()
-                            .rounded_sm()
-                            .overflow_hidden()
-                            .child(img(page.image.clone()).max_w_full().w(width).h(height)),
+                        Button::new("pdf-prev-page")
+                            .ghost()
+                            .small()
+                            .compact()
+                            .icon(Icon::new(IconName::ChevronUp))
+                            .tooltip("Previous page")
+                            .disabled(total == 0 || current <= 1)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let page = this.current_page.saturating_sub(1);
+                                this.go_to_page(page, cx);
+                            })),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(format!("Page {} / {}", page_num, total)),
+                            .min_w(px(72.))
+                            .text_center()
+                            .child(format!("Page {current} / {total}")),
                     )
-            }))
+                    .child(
+                        Button::new("pdf-next-page")
+                            .ghost()
+                            .small()
+                            .compact()
+                            .icon(Icon::new(IconName::ChevronDown))
+                            .tooltip("Next page")
+                            .disabled(total == 0 || current >= total)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let page = this.current_page + 1;
+                                this.go_to_page(page, cx);
+                            })),
+                    ),
+            )
+    }
+
+    fn render_content(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let theme = cx.theme();
+
+        let Some(doc) = &self.doc else {
+            return self.render_empty("No PDF loaded.", theme.muted_foreground);
+        };
+        if doc.pages.is_empty() {
+            return self.render_empty("This PDF has no pages.", theme.muted_foreground);
+        }
+
+        let zoom = self.zoom;
+        let total = doc.pages.len();
+        let viewport_width = self.scroll.bounds().size.width.as_f32();
+        let sizes: Rc<Vec<Size<Pixels>>> = Rc::new(
+            doc.pages
+                .iter()
+                .map(|page| {
+                    gpui_kit::size(px(page.width * zoom), px(page.height * zoom + PAGE_GAP))
+                })
+                .collect(),
+        );
+        // Measure the widest page, so the content can be wider than the
+        // viewport and zoomed-in pages stay horizontally reachable.
+        let measure_ix = doc
+            .pages
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.width.total_cmp(&b.1.width))
+            .map(|(ix, _)| ix)
+            .unwrap_or(0);
+
+        let border = theme.border;
+        let muted = theme.muted_foreground;
+
+        v_virtual_list(
+            cx.entity(),
+            "pdf-pages",
+            sizes,
+            move |this, range: Range<usize>, _window, _cx| {
+                if let Some(doc) = &this.doc {
+                    this.current_page = range.start.min(doc.pages.len().saturating_sub(1));
+                }
+                range
+                    .filter_map(|ix| {
+                        let page = this.doc.as_ref()?.pages.get(ix)?.clone();
+                        let width = px(page.width * zoom);
+                        let height = px(page.height * zoom);
+                        let row_width = px((page.width * zoom).max(viewport_width));
+                        let image = this.doc.as_mut()?.image(ix);
+                        let card = match image {
+                            Some(image) => div()
+                                .w(width)
+                                .h(height)
+                                .bg(rgb(0xffffff))
+                                .border_1()
+                                .border_color(border)
+                                .shadow_md()
+                                .rounded_sm()
+                                .overflow_hidden()
+                                .child(img(image).w(width).h(height))
+                                .into_any_element(),
+                            None => div()
+                                .w(width)
+                                .h(height)
+                                .bg(rgb(0xffffff))
+                                .border_1()
+                                .border_color(border)
+                                .rounded_sm()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("Page {}", page.page_number))
+                                .into_any_element(),
+                        };
+                        Some(
+                            v_flex()
+                                .id(ElementId::NamedInteger("pdf-page".into(), ix as u64))
+                                .w(row_width)
+                                .items_center()
+                                .pb(px(PAGE_GAP))
+                                .child(card)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(format!("{} / {}", page.page_number, total)),
+                                )
+                                .into_any_element(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .with_item_to_measure_index(measure_ix)
+        .track_scroll(&self.scroll)
+        .bg(theme.background)
+        .into_any_element()
+    }
+
+    fn render_empty(&self, message: &str, muted: gpui_kit::Hsla) -> gpui_kit::AnyElement {
+        v_flex()
+            .id("pdf-empty")
+            .size_full()
+            .items_center()
+            .justify_center()
+            .p_8()
+            .text_sm()
+            .text_color(muted)
+            .child(message.to_string())
             .into_any_element()
     }
 }
@@ -435,6 +577,11 @@ impl Focusable for PdfView {
 
 impl Render for PdfView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Resolve fit modes against the live viewport before drawing the
+        // toolbar, so the percentage shown matches the pages below it.
+        let viewport = self.scroll.bounds().size;
+        self.zoom = self.resolved_zoom(viewport);
+
         v_flex()
             .id("pdf-view")
             .track_focus(&self.focus_handle)
@@ -454,7 +601,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_and_renders_minimal_pdf() {
+    fn parses_and_measures_minimal_pdf() {
         // Generate a minimal valid PDF using Typst's world & compiler
         let markup = "= Hello Malgel PDF\n\nThis is a test of Hayro PDF rendering.";
         let doc = crate::typst_world::compile(
@@ -467,19 +614,19 @@ mod tests {
         let pdf_bytes =
             typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default()).expect("generate pdf bytes");
 
-        let pages = render_pdf_bytes(&pdf_bytes).expect("render pdf pages");
-        assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].page_number, 1);
-        assert!(pages[0].width > 0.0);
-        assert!(pages[0].height > 0.0);
-        assert!(pages[0].svg.contains("<svg"));
-        assert!(pages[0].svg.contains("</svg>"));
+        let mut document = PdfDocument::from_bytes(pdf_bytes).expect("parse pdf");
+        assert_eq!(document.page_count(), 1);
+        assert_eq!(document.pages()[0].page_number, 1);
+        assert!(document.pages()[0].width > 0.0);
+        assert!(document.pages()[0].height > 0.0);
+        // Rendering a page on demand produces an SVG-backed image.
+        assert!(document.image(0).is_some());
+        assert!(document.image(1).is_none());
     }
 
     #[test]
     fn reports_error_on_invalid_pdf_bytes() {
-        let invalid = b"NOT A VALID PDF FILE";
-        let result = render_pdf_bytes(invalid);
-        assert!(result.is_err());
+        let invalid = b"NOT A VALID PDF FILE".to_vec();
+        assert!(PdfDocument::from_bytes(invalid).is_err());
     }
 }

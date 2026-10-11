@@ -11,8 +11,8 @@ use std::{
 
 use gpui_kit::{
     App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
-    Focusable as _, HighlightStyle, InteractiveElement as _, IntoElement, KeyDownEvent, ListOffset,
-    MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollWheelEvent, SharedString,
+    Focusable as _, HighlightStyle, Image, InteractiveElement as _, IntoElement, KeyDownEvent,
+    ListOffset, MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollWheelEvent, SharedString,
     Styled as _, Subscription, Task, Window,
     base::{
         TextView, TextViewState,
@@ -92,6 +92,7 @@ pub struct DocumentView {
     editor: Entity<EditorState>,
     preview: Entity<TextViewState>,
     pdf: Option<Entity<crate::pdf_view::PdfView>>,
+    image: Option<Entity<crate::image_view::ImageView>>,
     /// Parser configuration for the preview; built once so the preview can
     /// tell that it is unchanged between frames.
     markdown_extensions: gpui_kit::component::text::MarkdownExtensions,
@@ -198,6 +199,7 @@ impl DocumentView {
         let mut this = Self {
             editor,
             pdf: None,
+            image: None,
             markdown_extensions: preview_ext::markdown_extensions(&preview),
             preview,
             path: None,
@@ -247,14 +249,64 @@ impl DocumentView {
         self.path.as_ref()
     }
 
-    /// A document displaying a PDF file rendered via Hayro.
-    pub fn new_pdf(
+    /// A document displaying an image (PNG, JPEG, SVG, …) with zoom.
+    pub fn new_image(
         path: PathBuf,
-        pages: Vec<crate::pdf_view::PdfPage>,
+        image: Arc<Image>,
+        width: f32,
+        height: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let pdf = cx.new(|cx| crate::pdf_view::PdfView::new(Some(path.clone()), pages, cx));
+        let image = cx.new(|cx| {
+            crate::image_view::ImageView::new(Some(path.clone()), image, width, height, cx)
+        });
+        let editor = cx.new(|cx| EditorState::new(window, cx));
+        let preview = cx.new(|cx| TextViewState::markdown("", cx));
+        let markdown_extensions = preview_ext::markdown_extensions(&preview);
+        Self {
+            editor,
+            preview,
+            pdf: None,
+            image: Some(image),
+            markdown_extensions,
+            path: Some(path),
+            line_ending: LineEnding::Lf,
+            saved_hash: 0,
+            dirty: false,
+            disk: None,
+            source: "".into(),
+            revision: 0,
+            analysis: Arc::new(Analysis::default()),
+            analysis_task: None,
+            pending_anchor: None,
+            recovery_id: session::new_recovery_id(),
+            recovery_written: false,
+            recovery_task: None,
+            misspellings: Arc::default(),
+            spell_task: None,
+            spell_checked: None,
+            last_cursor: 0,
+            focus_decorations: None,
+            focus_block: None,
+            scroll_driver: ScrollDriver::Editor,
+            synced_editor_scroll: None,
+            synced_preview_scroll: None,
+            editor_scroll_target: None,
+            synced_preview_rows: 0,
+            editor_width: px(0.),
+            preview_width: px(0.),
+            _subscriptions: Vec::new(),
+        }
+    }
+
+    pub fn new_pdf(
+        path: PathBuf,
+        doc: crate::pdf_view::PdfDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let pdf = cx.new(|cx| crate::pdf_view::PdfView::new(Some(path.clone()), doc, cx));
         let editor = cx.new(|cx| EditorState::new(window, cx));
         let preview = cx.new(|cx| TextViewState::markdown("", cx));
         let markdown_extensions = preview_ext::markdown_extensions(&preview);
@@ -263,6 +315,7 @@ impl DocumentView {
             preview,
             markdown_extensions,
             pdf: Some(pdf),
+            image: None,
             path: Some(path),
             line_ending: LineEnding::Lf,
             saved_hash: 0,
@@ -294,10 +347,34 @@ impl DocumentView {
     }
 
     pub fn is_dirty(&self) -> bool {
-        if self.pdf.is_some() {
+        if self.pdf.is_some() || self.image.is_some() {
             return false;
         }
         self.dirty
+    }
+
+    /// Whether this document shows a media view (PDF or image) rather than
+    /// editable text, so zoom commands act on the viewer instead of the UI.
+    pub fn is_media(&self) -> bool {
+        self.pdf.is_some() || self.image.is_some()
+    }
+
+    /// Forward a zoom step (positive zooms in, negative out, zero resets) to
+    /// the PDF or image viewer this document shows.
+    pub fn zoom_media(&mut self, step: f32, cx: &mut Context<Self>) {
+        if let Some(pdf) = &self.pdf {
+            pdf.update(cx, |pdf, cx| match step.partial_cmp(&0.) {
+                Some(std::cmp::Ordering::Greater) => pdf.zoom_in(cx),
+                Some(std::cmp::Ordering::Less) => pdf.zoom_out(cx),
+                _ => pdf.reset_zoom(cx),
+            });
+        } else if let Some(image) = &self.image {
+            image.update(cx, |image, cx| match step.partial_cmp(&0.) {
+                Some(std::cmp::Ordering::Greater) => image.zoom_in(cx),
+                Some(std::cmp::Ordering::Less) => image.zoom_out(cx),
+                _ => image.reset_zoom(cx),
+            });
+        }
     }
 
     pub fn source(&self) -> &SharedString {
@@ -885,16 +962,6 @@ impl DocumentView {
         false
     }
 
-    /// Insert dropped image files at the caret.
-    pub fn drop_images(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
-        let images = paths
-            .iter()
-            .filter(|path| is_image_path(path))
-            .map(|path| ImageSource::File(path.clone()))
-            .collect();
-        self.insert_images(images, window, cx);
-    }
-
     /// Store images in the document's image folder (files already beside
     /// the document are linked where they are) and link them at the caret.
     fn insert_images(
@@ -1391,6 +1458,9 @@ impl Render for DocumentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(pdf) = &self.pdf {
             return pdf.clone().into_any_element();
+        }
+        if let Some(image_view) = &self.image {
+            return image_view.clone().into_any_element();
         }
         if self.analysis_task.is_none()
             && let Some(anchor) = self.pending_anchor.take()

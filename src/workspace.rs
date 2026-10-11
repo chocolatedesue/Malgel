@@ -141,6 +141,20 @@ impl Workspace {
                 window,
                 |this, _, event, window, cx| match event {
                     FileTreeEvent::Open(path) => this.open_paths(vec![path.clone()], window, cx),
+                    FileTreeEvent::Copied { copied, failed } => {
+                        let message = match (copied, failed) {
+                            (0, _) => "Nothing was copied: the drop target sits inside the source, or the files couldn’t be written.".to_string(),
+                            (copied, 0) => format!(
+                                "Copied {copied} item{} into the folder.",
+                                if *copied == 1 { "" } else { "s" }
+                            ),
+                            (copied, failed) => format!(
+                                "Copied {copied} item{}; {failed} couldn’t be copied.",
+                                if *copied == 1 { "" } else { "s" }
+                            ),
+                        };
+                        window.push_notification(Notification::info(message), cx);
+                    }
                 },
             ),
             cx.observe_global_in::<AppSettings>(window, |this, window, cx| {
@@ -225,7 +239,7 @@ impl Workspace {
                 None if wanted => entry.path.as_ref().and_then(|path| {
                     // PDFs cannot be loaded as text documents; open them after
                     // the window finishes building via the normal PDF path.
-                    if document::is_pdf_path(path) {
+                    if document::is_pdf_path(path) || document::is_image_path(path) {
                         deferred_open.push(path.clone());
                         return None;
                     }
@@ -475,18 +489,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if document::is_pdf_path(&path) {
-            eprintln!("TRACE: load_path pdf branch (sync): {}", path.display());
             // The async spawn_in continuation never resumes under the current
             // gpui-pre build when spawned from the startup path, so render
             // inline: PDFs are small and this keeps open/restore working.
             let result = std::fs::read(&path)
                 .map_err(|e| e.to_string())
-                .and_then(|bytes| crate::pdf_view::render_pdf_bytes(&bytes));
+                .and_then(crate::pdf_view::PdfDocument::from_bytes);
             match result {
-                Ok(pages) => {
-                    eprintln!("TRACE: load_path pdf OK, {} pages", pages.len());
+                Ok(document) => {
                     AppSettings::update(cx, |settings| settings.push_recent(&path));
-                    let doc = cx.new(|cx| DocumentView::new_pdf(path.clone(), pages, window, cx));
+                    let doc =
+                        cx.new(|cx| DocumentView::new_pdf(path.clone(), document, window, cx));
                     let active = self.active_document().read(cx);
                     let replace = active.is_blank()
                         || match placement {
@@ -501,13 +514,58 @@ impl Workspace {
                     }
                 }
                 Err(err) => {
-                    eprintln!("TRACE: load_path pdf ERR: {err}");
                     AppSettings::update(cx, |settings| {
                         settings.recent_files.retain(|recent| recent != &path)
                     });
                     self.notify_error(
                         format!(
                             "Couldn’t open “{}”. {err}",
+                            document::display_name(Some(&path))
+                        ),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            return;
+        }
+
+        if document::is_image_path(&path) {
+            match std::fs::read(&path) {
+                Ok(bytes) => match crate::image_view::load_image(&path, bytes) {
+                    Ok((image, width, height)) => {
+                        AppSettings::update(cx, |settings| settings.push_recent(&path));
+                        let doc = cx.new(|cx| {
+                            DocumentView::new_image(path.clone(), image, width, height, window, cx)
+                        });
+                        let active = self.active_document().read(cx);
+                        let replace = active.is_blank()
+                            || match placement {
+                                Placement::Default => !AppSettings::get(cx).tabs,
+                                Placement::NewTab => false,
+                                Placement::ReplaceActive => true,
+                            };
+                        if replace {
+                            self.replace_active(doc.clone(), window, cx);
+                        } else {
+                            self.add_document(doc.clone(), true, window, cx);
+                        }
+                    }
+                    Err(err) => {
+                        self.notify_error(
+                            format!(
+                                "Couldn\u{2019}t open \u{201c}{}\u{201d}. {err}",
+                                document::display_name(Some(&path))
+                            ),
+                            window,
+                            cx,
+                        );
+                    }
+                },
+                Err(err) => {
+                    self.notify_error(
+                        format!(
+                            "Couldn\u{2019}t read \u{201c}{}\u{201d}. {err}",
                             document::display_name(Some(&path))
                         ),
                         window,
@@ -1544,51 +1602,32 @@ impl Workspace {
         }
     }
 
-    fn is_image_path(path: &Path) -> bool {
-        matches!(
-            path.extension().and_then(|ext| ext.to_str()),
-            Some(ext) if matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif"
-            )
-        )
-    }
-
     fn on_drop_paths(
         &mut self,
         paths: &ExternalPaths,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Route drops the way VS Code does: folders open as the sidebar
-        // root, openable files open as documents, and only actual images
-        // keep the legacy "insert into the markdown source" behavior.
+        // Route drops the way VS Code does: folders become the sidebar root,
+        // and every file the app can show (text, code, Markdown, PDF, image)
+        // opens as its own tab. Dropping onto the file tree is handled by the
+        // tree itself (copy into the folder), so it never reaches here.
         let mut documents: Vec<PathBuf> = Vec::new();
         let mut folders: Vec<PathBuf> = Vec::new();
-        let mut images: Vec<PathBuf> = Vec::new();
         for path in paths.paths() {
             if path.is_dir() {
                 folders.push(path.clone());
-            } else if Self::is_image_path(path) {
-                images.push(path.clone());
             } else {
                 documents.push(path.clone());
             }
         }
         for folder in &folders {
+            AppSettings::update(cx, |settings| settings.push_recent(folder));
             self.file_tree
                 .update(cx, |tree, cx| tree.set_root(Some(folder.clone()), cx));
         }
         if !documents.is_empty() {
             self.open_paths(documents, window, cx);
-            return;
-        }
-        if !images.is_empty()
-            && (AppSettings::get(cx).layout.shows_editor() || AppSettings::get(cx).focus_mode)
-        {
-            self.active_document()
-                .clone()
-                .update(cx, |doc, cx| doc.drop_images(&images, window, cx));
             return;
         }
         if folders.is_empty() {
@@ -1661,6 +1700,17 @@ impl Workspace {
                 clamp_font_size(settings.font_size + delta)
             };
         });
+    }
+
+    /// Zoom the active document's viewer when it shows a PDF or image, and
+    /// the UI font otherwise.
+    fn zoom_active(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let doc = self.active_document().clone();
+        if doc.read(cx).is_media() {
+            doc.update(cx, |doc, cx| doc.zoom_media(delta, cx));
+        } else {
+            self.zoom(delta, cx);
+        }
     }
 
     fn toggle_appearance(&mut self, _: &ToggleAppearance, _: &mut Window, cx: &mut Context<Self>) {
@@ -2843,9 +2893,9 @@ impl Render for Workspace {
                 this.recheck_spelling(cx);
             }))
             .on_action(|_: &About, window, cx| open_about(window, cx))
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1., cx)))
-            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(-1., cx)))
-            .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(0., cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_active(1., cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_active(-1., cx)))
+            .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_active(0., cx)))
             .on_action(cx.listener(|this, _: &TidyTable, window, cx| {
                 this.with_active(window, cx, |doc, window, cx| doc.tidy_table(window, cx))
             }))
