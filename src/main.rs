@@ -50,7 +50,21 @@ struct MainWindow {
 
 impl Global for MainWindow {}
 
+
+struct StdErrLogger;
+impl log::Log for StdErrLogger {
+    fn enabled(&self, meta: &log::Metadata) -> bool { meta.level() <= log::Level::Trace }
+    fn log(&self, record: &log::Record) { eprintln!("[{}::{}] {}", record.level(), record.target(), record.args()); }
+    fn flush(&self) {}
+}
+
 fn main() {
+    let _ = log::set_boxed_logger(Box::new(StdErrLogger));
+    let level = match std::env::var("RUST_LOG") {
+    Ok(_) => log::LevelFilter::Trace,
+    Err(_) => log::LevelFilter::Warn,
+};
+log::set_max_level(level);
     let paths: Vec<PathBuf> = std::env::args_os()
         .skip(1)
         .filter(|arg| !arg.to_string_lossy().starts_with('-'))
@@ -185,7 +199,7 @@ fn open_window(
         workspace
     });
     if let Err(err) = result {
-        eprintln!("malgel: could not open a window: {err}");
+        eprintln!("malgel: could not open a window: {err:#}");
         cx.quit();
     }
 }

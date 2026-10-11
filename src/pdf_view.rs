@@ -96,7 +96,6 @@ pub fn default_interpreter_settings() -> InterpreterSettings {
 /// Render all pages of a PDF document from raw bytes.
 pub fn render_pdf_bytes(bytes: &[u8]) -> Result<Vec<PdfPage>, String> {
     let pdf = Pdf::new(bytes.to_vec())
-        .map_err(|e| format!("Failed to parse PDF: {e:?}"))?;
 
     let cache = RenderCache::new();
     let interpreter_settings = default_interpreter_settings();
