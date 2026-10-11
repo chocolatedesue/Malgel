@@ -9,6 +9,7 @@ homepage = "https://www.malgel.com"
 publish = false
 
 [dependencies]
+log = "0.4"
 # GPUI Kit is the only UI dependency: it re-exports GPUI, GPUI Base and GPUI Component.
 gpui-kit = { version = "0.7.0", features = [
     "tree-sitter",

@@ -4960,6 +4960,7 @@ dependencies = [
  "hayro",
  "hayro-svg",
  "image",
+ "log",
  "markdown",
  "merman",
  "resvg 0.46.0",

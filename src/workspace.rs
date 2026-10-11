@@ -209,6 +209,7 @@ impl Workspace {
         let previous = previous.unwrap_or_default();
         let mut active = None;
         let mut referenced = HashSet::new();
+        let mut deferred_open = paths.clone();
 
         for (ix, entry) in previous.documents.iter().enumerate() {
             let recovery = entry.recovery.as_deref().and_then(|id| {
@@ -223,6 +224,12 @@ impl Workspace {
             let doc = match recovery {
                 Some((id, recovery)) => Some(self.restored_document(id, recovery, window, cx)),
                 None if wanted => entry.path.as_ref().and_then(|path| {
+                    // PDFs cannot be loaded as text documents; open them after
+                    // the window finishes building via the normal PDF path.
+                    if document::is_pdf_path(path) {
+                        deferred_open.push(path.clone());
+                        return None;
+                    }
                     let loaded = document::load(path).ok()?;
                     Some(cx.new(|cx| {
                         DocumentView::new(
@@ -288,8 +295,13 @@ impl Workspace {
         self.active = active
             .unwrap_or(0)
             .min(self.documents.len().saturating_sub(1));
-        if !paths.is_empty() {
-            self.open_paths(paths, window, cx);
+        // open_paths spawns async loads that must update this workspace
+        // through the window; defer until the build callback has returned,
+        // otherwise update_in is rejected while the window is on the stack.
+        if !deferred_open.is_empty() {
+            cx.defer_in(window, move |this, window, cx| {
+                this.open_paths(deferred_open, window, cx);
+            });
         }
         self.focus_active(window, cx);
         self.sync_file_tree(cx);
@@ -456,47 +468,45 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if document::is_pdf_path(&path) {
-            let read_path = path.clone();
-            let task = cx
-                .background_executor()
-                .spawn(async move {
-                    std::fs::read(&read_path)
-                        .map_err(|e| e.to_string())
-                        .and_then(|bytes| crate::pdf_view::render_pdf_bytes(&bytes))
-                });
-            _ = cx.spawn_in(window, async move |this, cx| {
-                let result = task.await;
-                _ = this.update_in(cx, |this, window, cx| match result {
-                    Ok(pages) => {
-                        AppSettings::update(cx, |settings| settings.push_recent(&path));
-                        let doc = cx.new(|cx| {
-                            DocumentView::new_pdf(path.clone(), pages, window, cx)
-                        });
-                        let active = this.active_document().read(cx);
-                        let replace = active.is_blank()
-                            || match placement {
-                                Placement::Default => !AppSettings::get(cx).tabs,
-                                Placement::NewTab => false,
-                                Placement::ReplaceActive => true,
-                            };
-                        if replace {
-                            this.replace_active(doc.clone(), window, cx);
-                        } else {
-                            this.add_document(doc.clone(), true, window, cx);
-                        }
+            eprintln!("TRACE: load_path pdf branch (sync): {}", path.display());
+            // The async spawn_in continuation never resumes under the current
+            // gpui-pre build when spawned from the startup path, so render
+            // inline: PDFs are small and this keeps open/restore working.
+            let result = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| crate::pdf_view::render_pdf_bytes(&bytes));
+            match result {
+                Ok(pages) => {
+                    eprintln!("TRACE: load_path pdf OK, {} pages", pages.len());
+                    AppSettings::update(cx, |settings| settings.push_recent(&path));
+                    let doc = cx.new(|cx| {
+                        DocumentView::new_pdf(path.clone(), pages, window, cx)
+                    });
+                    let active = self.active_document().read(cx);
+                    let replace = active.is_blank()
+                        || match placement {
+                            Placement::Default => !AppSettings::get(cx).tabs,
+                            Placement::NewTab => false,
+                            Placement::ReplaceActive => true,
+                        };
+                    if replace {
+                        self.replace_active(doc.clone(), window, cx);
+                    } else {
+                        self.add_document(doc.clone(), true, window, cx);
                     }
-                    Err(err) => {
-                        AppSettings::update(cx, |settings| {
-                            settings.recent_files.retain(|recent| recent != &path)
-                        });
-                        this.notify_error(
-                            format!("Couldn’t open “{}”. {err}", document::display_name(Some(&path))),
-                            window,
-                            cx,
-                        );
-                    }
-                });
-            });
+                }
+                Err(err) => {
+                    eprintln!("TRACE: load_path pdf ERR: {err}");
+                    AppSettings::update(cx, |settings| {
+                        settings.recent_files.retain(|recent| recent != &path)
+                    });
+                    self.notify_error(
+                        format!("Couldn’t open “{}”. {err}", document::display_name(Some(&path))),
+                        window,
+                        cx,
+                    );
+                }
+            }
             return;
         }
 

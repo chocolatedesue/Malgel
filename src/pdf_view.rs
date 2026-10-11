@@ -95,8 +95,10 @@ pub fn default_interpreter_settings() -> InterpreterSettings {
 
 /// Render all pages of a PDF document from raw bytes.
 pub fn render_pdf_bytes(bytes: &[u8]) -> Result<Vec<PdfPage>, String> {
+    eprintln!("TRACE: render_pdf_bytes enter, {} bytes", bytes.len());
     let pdf = Pdf::new(bytes.to_vec())
-        .map_err(|e| format!("Failed to parse PDF: {e:?}"))?;
+        .map_err(|e| { eprintln!("TRACE: Pdf::new failed: {e:?}"); format!("Failed to parse PDF: {e:?}") })?;
+    eprintln!("TRACE: Pdf::new ok, {} pages", pdf.pages().len());
 
     let cache = RenderCache::new();
     let interpreter_settings = default_interpreter_settings();
@@ -108,6 +110,7 @@ pub fn render_pdf_bytes(bytes: &[u8]) -> Result<Vec<PdfPage>, String> {
     for (index, page) in pdf.pages().iter().enumerate() {
         let (width, height) = page.render_dimensions();
         let svg = convert(page, &cache, &interpreter_settings, &render_settings);
+        eprintln!("TRACE: page {} svg {} bytes", index, svg.len());
         let image = Arc::new(Image::from_bytes(ImageFormat::Svg, svg.as_bytes().to_vec()));
         pages.push(PdfPage {
             index,
@@ -119,6 +122,7 @@ pub fn render_pdf_bytes(bytes: &[u8]) -> Result<Vec<PdfPage>, String> {
         });
     }
 
+    eprintln!("TRACE: render done, {} pages", pages.len());
     Ok(pages)
 }
 
