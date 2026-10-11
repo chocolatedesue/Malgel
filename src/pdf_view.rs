@@ -372,7 +372,7 @@ impl PdfView {
             .flex_1()
             .min_h_0()
             .w_full()
-            .overflow_y_scrollbar()
+            .overflow_scrollbar()
             .bg(theme.background)
             .py_8()
             .px_4()
