@@ -434,6 +434,13 @@ impl Workspace {
         let tabs = AppSettings::get(cx).tabs;
         for path in paths {
             let path = path.canonicalize().unwrap_or(path);
+            if path.is_dir() {
+                // A directory argument (CLI or a second launch) becomes the
+                // sidebar root, the way VS Code opens a folder.
+                self.file_tree
+                    .update(cx, |tree, cx| tree.set_root(Some(path), cx));
+                continue;
+            }
             if let Some(ix) = self
                 .documents
                 .iter()
@@ -845,6 +852,59 @@ impl Workspace {
             return;
         };
         self.open_paths(vec![path], window, cx);
+    }
+
+    /// Open a system terminal in the current folder (VS Code Ctrl+`).
+    fn summon_terminal(&mut self, cx: &mut Context<Self>) {
+        let doc_dir = self
+            .active_document()
+            .read(cx)
+            .path()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .ok()
+            .map(PathBuf::from);
+        let dir = self
+            .file_tree
+            .read(cx)
+            .root()
+            .map(Path::to_path_buf)
+            .or(doc_dir)
+            .or(home);
+        let Some(dir) = dir else {
+            return;
+        };
+        #[cfg(target_os = "windows")]
+        {
+            if std::process::Command::new("wt")
+                .arg("-d")
+                .arg(&dir)
+                .spawn()
+                .is_err()
+            {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", "", "/D"])
+                    .arg(&dir)
+                    .spawn();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg("-a")
+                .arg("Terminal")
+                .arg(&dir)
+                .spawn();
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let spawned = std::process::Command::new("x-terminal-emulator")
+                .current_dir(&dir)
+                .spawn()
+                .or_else(|_| std::process::Command::new("xterm").current_dir(&dir).spawn());
+            let _ = spawned;
+        }
     }
 
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -2691,6 +2751,9 @@ impl Render for Workspace {
                     cx,
                 )
             }))
+            .on_action(cx.listener(|this, _: &SummonTerminal, _, cx| {
+                this.summon_terminal(cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleTabs, _, cx| {
                 this.toggle(|settings| settings.tabs = !settings.tabs, cx)
             }))
@@ -2817,7 +2880,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let documents: Vec<PathBuf> = paths.into_iter().filter(|path| path.is_file()).collect();
+        // A directory argument (CLI or a second launch) becomes the sidebar
+        // root, the way VS Code opens a folder.
+        let mut documents: Vec<PathBuf> = Vec::new();
+        for path in paths {
+            if path.is_dir() {
+                self.file_tree
+                    .update(cx, |tree, cx| tree.set_root(Some(path), cx));
+            } else if path.is_file() {
+                documents.push(path);
+            }
+        }
         if !documents.is_empty() {
             self.open_paths(documents, window, cx);
         }

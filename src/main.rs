@@ -30,6 +30,9 @@ mod themes;
 mod typst_world;
 mod workspace;
 
+use std::io::{Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 
 use futures::StreamExt as _;
@@ -72,9 +75,19 @@ log::set_max_level(level);
         .map(|path| path.canonicalize().unwrap_or(path))
         .collect();
 
+    // A second launch hands its arguments to the running instance and exits,
+    // the way VS Code wakes the existing window.
+    if forward_to_running_instance(&paths) {
+        return;
+    }
+
     // macOS delivers "Open with" and double-clicked files as URLs, outside
     // the app's context; they are handed over through a channel.
     let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+    {
+        let cli_tx = open_tx.clone();
+        std::thread::spawn(move || listen_for_cli(cli_tx));
+    }
     let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     application.on_open_urls(move |urls| {
         let paths: Vec<PathBuf> = urls
@@ -148,6 +161,12 @@ fn open_paths(
     app_menu_bar: gpui_kit::Entity<gpui_kit::component::menu::AppMenuBar>,
     cx: &mut App,
 ) {
+    if paths.is_empty() {
+        if let Some(main) = cx.try_global::<MainWindow>() {
+            _ = main.handle.update(cx, |_, window, _| window.activate_window());
+        }
+        return;
+    }
     if let Some(main) = cx.try_global::<MainWindow>() {
         let (handle, workspace) = (main.handle, main.workspace.clone());
         let opened = handle.update(cx, |_, window, cx| {
@@ -220,4 +239,72 @@ fn with_window(cx: &mut App, f: impl FnOnce(&mut gpui_kit::Window, &mut App)) {
         return;
     };
     _ = window.update(cx, |_, window, cx| f(window, cx));
+}
+
+/// Ports the first instance listens on; a second launch probes these.
+const CLI_PORTS: [u16; 10] = [
+    47615, 47616, 47617, 47618, 47619, 47620, 47621, 47622, 47623, 47624,
+];
+const CLI_MAGIC: &str = "malgel-cli-v1";
+
+/// Hand `paths` to the running instance; `true` when it acknowledged.
+fn forward_to_running_instance(paths: &[PathBuf]) -> bool {
+    for port in CLI_PORTS {
+        let Ok(mut stream) = TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(250),
+        ) else {
+            continue;
+        };
+        if stream.set_read_timeout(Some(Duration::from_secs(2))).is_err() {
+            continue;
+        }
+        let mut payload = String::from(CLI_MAGIC);
+        payload.push('\n');
+        for path in paths {
+            payload.push_str(&path.to_string_lossy());
+            payload.push('\n');
+        }
+        if stream.write_all(payload.as_bytes()).is_err() {
+            continue;
+        }
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut reply = String::new();
+        if stream.read_to_string(&mut reply).is_ok()
+            && reply.contains("malgel-cli-ok")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Accept forwarded launches on the first free port in `CLI_PORTS`.
+fn listen_for_cli(open_tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>) {
+    for port in CLI_PORTS {
+        let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut payload = String::new();
+            if stream.read_to_string(&mut payload).is_err() {
+                continue;
+            }
+            let mut lines = payload.lines();
+            if lines.next() != Some(CLI_MAGIC) {
+                continue;
+            }
+            let paths: Vec<PathBuf> = lines
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from)
+                .map(|path| path.canonicalize().unwrap_or(path))
+                .collect();
+            let _ = open_tx.unbounded_send(paths);
+            let _ = stream.write_all(b"malgel-cli-ok\n");
+        }
+    }
 }
