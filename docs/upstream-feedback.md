@@ -125,10 +125,12 @@ same setup:
 ## 8. Sidebar shows every file; drop routing by type
 
 - The sidebar filtered to markdown/pdf files, skipped dotfiles and
-  dependency folders (node_modules, target, venv, ...). It lists
-  everything now, the way VS Code does: any extension, dotfiles
-  included. Clicking a text file opens it as a document, a PDF opens
-  the PDF viewer.
+  dependency folders (node_modules, target, venv, ...). It lists every
+  extension and dotfile now, with VS Code's default `files.exclude`
+  behavior on top: .git, .svn, .hg, CVS, .DS_Store and Thumbs.db stay
+  hidden until the new "Show hidden entries" settings toggle is turned
+  on (the FileTree observes the settings global and re-lists). Clicking
+  a text file opens it as a document, a PDF opens the PDF viewer.
 - Dropping external paths only recognized markdown: PDFs, plain text
   and code files fell into the image-insert path or errored. Drops are
   routed by type now: folders open as the sidebar root, openable files
