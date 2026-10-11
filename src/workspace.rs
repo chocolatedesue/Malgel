@@ -2660,16 +2660,15 @@ impl Render for Workspace {
         let sidebar_range = rems(12.).to_pixels(rem)..rems(28.).to_pixels(rem);
         let files_width = rems(15.).to_pixels(rem);
         let outline_width = rems(14.).to_pixels(rem);
-        let mut document_width = window.viewport_size().width;
-        if show_files {
-            document_width -= files_width;
-        }
-        if show_outline {
-            document_width -= outline_width;
-        }
-
         // Each arrangement of panes keeps its own sizes, so adding or
         // removing a sidebar starts it at its natural width.
+        //
+        // The document panel deliberately has no size preference: it is the
+        // flexible slot and fills whatever the sidebars leave. Sizing it from
+        // `viewport_size` minus an assumed sidebar width desyncs from the
+        // resizable group's actual sizes (user-resized/persisted sidebars,
+        // HiDPI unit mix), which used to push the whole panel past the
+        // window edge — most visibly in the PDF view.
         let mut main = h_resizable(match (show_files, show_outline) {
             (true, true) => "panes-files-outline",
             (true, false) => "panes-files",
@@ -2686,7 +2685,6 @@ impl Render for Workspace {
         }
         main = main.child(
             resizable_panel()
-                .size(document_width)
                 .size_range(rems(20.).to_pixels(rem)..Pixels::MAX)
                 .child(
                     v_flex()
