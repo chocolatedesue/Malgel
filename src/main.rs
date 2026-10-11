@@ -19,6 +19,7 @@ mod links;
 mod math;
 mod menus;
 mod pdf;
+pub mod pdf_view;
 mod preview_ext;
 mod rich_copy;
 mod session;

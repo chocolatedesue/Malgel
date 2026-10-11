@@ -13,6 +13,8 @@ use std::{
 };
 
 use gpui_kit::{
+    Anchor,
+    base::Disableable as _,
     App, AppContext as _, Bounds, Context, Entity, EntityId, ExternalPaths, FocusHandle, Focusable,
     FontWeight, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
     PathPromptOptions, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -27,7 +29,7 @@ use gpui_kit::{
         h_flex,
         input::Escape,
         link::Link,
-        menu::AppMenuBar,
+        menu::{AppMenuBar, ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
         notification::Notification,
         radio::RadioGroup,
         resizable::{h_resizable, resizable_panel},
@@ -74,6 +76,7 @@ enum AfterConfirm {
     /// Open a linked document in place of the current one, at a heading.
     OpenLink(PathBuf, Option<String>),
     CloseDocument(EntityId),
+    CloseDocuments(Vec<EntityId>),
     CloseWindow,
     Quit,
 }
@@ -452,6 +455,51 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if document::is_pdf_path(&path) {
+            let read_path = path.clone();
+            let task = cx
+                .background_executor()
+                .spawn(async move {
+                    std::fs::read(&read_path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| crate::pdf_view::render_pdf_bytes(&bytes))
+                });
+            _ = cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                _ = this.update_in(cx, |this, window, cx| match result {
+                    Ok(pages) => {
+                        AppSettings::update(cx, |settings| settings.push_recent(&path));
+                        let doc = cx.new(|cx| {
+                            DocumentView::new_pdf(path.clone(), pages, window, cx)
+                        });
+                        let active = this.active_document().read(cx);
+                        let replace = active.is_blank()
+                            || match placement {
+                                Placement::Default => !AppSettings::get(cx).tabs,
+                                Placement::NewTab => false,
+                                Placement::ReplaceActive => true,
+                            };
+                        if replace {
+                            this.replace_active(doc.clone(), window, cx);
+                        } else {
+                            this.add_document(doc.clone(), true, window, cx);
+                        }
+                    }
+                    Err(err) => {
+                        AppSettings::update(cx, |settings| {
+                            settings.recent_files.retain(|recent| recent != &path)
+                        });
+                        this.notify_error(
+                            format!("Couldn’t open “{}”. {err}", document::display_name(Some(&path))),
+                            window,
+                            cx,
+                        );
+                    }
+                });
+            });
+            return;
+        }
+
         let read_path = path.clone();
         let task = cx
             .background_executor()
@@ -824,6 +872,105 @@ impl Workspace {
         self.confirm_unsaved(doc, AfterConfirm::CloseDocument(id), window, cx);
     }
 
+    fn close_other_tabs(
+        &mut self,
+        _: &CloseOtherTabs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.documents.len() <= 1 {
+            return;
+        }
+        let keep_id = self.active_document().entity_id();
+        self.close_other_tabs_by_id(keep_id, window, cx);
+    }
+
+    fn close_other_tabs_by_id(
+        &mut self,
+        keep_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets: Vec<EntityId> = self
+            .documents
+            .iter()
+            .map(|doc| doc.entity_id())
+            .filter(|id| *id != keep_id)
+            .collect();
+        self.confirm_close_documents(targets, window, cx);
+    }
+
+    fn close_tabs_to_the_right(
+        &mut self,
+        _: &CloseTabsToTheRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_id = self.active_document().entity_id();
+        self.close_tabs_to_the_right_by_id(active_id, window, cx);
+    }
+
+    fn close_tabs_to_the_right_by_id(
+        &mut self,
+        from_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pos) = self.document_index(from_id) else {
+            return;
+        };
+        let targets: Vec<EntityId> = self.documents[pos + 1..]
+            .iter()
+            .map(|doc| doc.entity_id())
+            .collect();
+        self.confirm_close_documents(targets, window, cx);
+    }
+
+    fn confirm_close_documents(
+        &mut self,
+        targets: Vec<EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let valid_targets: Vec<EntityId> = targets
+            .into_iter()
+            .filter(|id| self.document_index(*id).is_some())
+            .collect();
+
+        if valid_targets.is_empty() {
+            return;
+        }
+
+        let pending = valid_targets.iter().find_map(|id| {
+            self.document_index(*id).and_then(|ix| {
+                let doc = &self.documents[ix];
+                if doc.read(cx).is_dirty() && !self.discarded.contains(id) {
+                    Some((ix, doc.clone()))
+                } else {
+                    None
+                }
+            })
+        });
+
+        match pending {
+            Some((ix, doc)) => {
+                self.activate(ix, window, cx);
+                self.confirm_unsaved(
+                    doc,
+                    AfterConfirm::CloseDocuments(valid_targets),
+                    window,
+                    cx,
+                );
+            }
+            None => {
+                for id in valid_targets {
+                    self.discarded.remove(&id);
+                    self.remove_document(id, window, cx);
+                }
+            }
+        }
+    }
+
     fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm_close(AfterConfirm::CloseWindow, window, cx);
     }
@@ -957,6 +1104,9 @@ impl Workspace {
                 self.discarded.remove(&id);
                 self.remove_document(id, window, cx);
             }
+            AfterConfirm::CloseDocuments(targets) => {
+                self.confirm_close_documents(targets, window, cx);
+            }
             AfterConfirm::CloseWindow | AfterConfirm::Quit => {
                 // More documents may still be waiting to be asked about.
                 let pending = self.documents.iter().any(|doc| {
@@ -1009,7 +1159,7 @@ impl Workspace {
                         .and_then(|dir| path.strip_prefix(dir).ok())
                         .unwrap_or(&path);
                     self.notify_error(format!("Couldn’t find “{}”.", shown.display()), window, cx);
-                } else if path.is_file() && is_markdown_path(&path) {
+                } else if path.is_file() && (is_markdown_path(&path) || document::is_pdf_path(&path)) {
                     let mut new_tab = AppSettings::get(cx).open_links_in == LinkPlacement::NewTab;
                     if action.alternate {
                         new_tab = !new_tab;
@@ -1540,68 +1690,150 @@ impl Workspace {
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let active_ix = self.active;
+        let count = self.documents.len();
+        let workspace = cx.weak_entity();
+
         h_flex()
             .id("tabs")
-            .h(px(34.))
+            .h(px(36.))
             .flex_none()
-            .px_1()
-            .gap_0p5()
+            .items_center()
+            .px_1p5()
+            .gap_1()
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.tab_bar)
-            .overflow_x_scrollbar()
-            .children(self.documents.iter().enumerate().map(|(ix, doc)| {
-                let doc = doc.read(cx);
-                let active = ix == self.active;
-                let dirty = doc.is_dirty();
-                let theme = cx.theme();
+            .when(count > 1, |this| {
+                this.child(
+                    Button::new("tab-scroll-prev")
+                        .ghost()
+                        .xsmall()
+                        .compact()
+                        .icon(Icon::new(IconName::ChevronLeft))
+                        .tooltip("Previous tab (Ctrl+Shift+Tab)")
+                        .disabled(active_ix == 0)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let count = this.documents.len();
+                            if count > 1 {
+                                let prev = (this.active + count - 1) % count;
+                                this.activate(prev, window, cx);
+                            }
+                        })),
+                )
+            })
+            .child(
                 h_flex()
-                    .id(("tab", ix))
-                    .group("tab")
-                    .h(px(28.))
-                    .max_w(px(220.))
-                    .flex_none()
-                    .pl_3()
-                    .pr_1()
+                    .id("tabs-scroll-area")
+                    .flex_1()
+                    .h_full()
+                    .items_center()
                     .gap_1()
-                    .rounded_md()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(active, |this| {
-                        this.bg(theme.tab_active)
-                            .text_color(theme.tab_active_foreground)
-                            .font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(!active, |this| {
-                        this.text_color(theme.muted_foreground)
-                            .hover(|style| style.bg(theme.list_hover))
-                    })
-                    .child(div().truncate().child(doc.name()))
-                    .child(
-                        div()
-                            .size(px(18.))
+                    .overflow_x_scrollbar()
+                    .children(self.documents.iter().enumerate().map(|(ix, doc_entity)| {
+                        let doc = doc_entity.read(cx);
+                        let doc_id = doc_entity.entity_id();
+                        let active = ix == active_ix;
+                        let dirty = doc.is_dirty();
+                        let is_last = ix + 1 >= count;
+                        let has_other = count > 1;
+                        let name = doc.name().to_string();
+                        let theme = cx.theme();
+                        let doc_weak = doc_entity.clone();
+                        let ws_menu = workspace.clone();
+
+                        h_flex()
+                            .id(("tab", ix))
+                            .group("tab")
+                            .h(px(28.))
+                            .max_w(px(220.))
                             .flex_none()
-                            .flex()
+                            .pl_2p5()
+                            .pr_1p5()
+                            .gap_1p5()
                             .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .hover(|style| style.bg(theme.list_active))
-                            .child(div().when(dirty, |this| {
-                                this.child(
-                                    div().size(px(7.)).rounded_full().bg(theme.muted_foreground),
-                                )
-                                .group_hover("tab", |style| style.invisible())
-                            }))
+                            .rounded_md()
+                            .text_sm()
+                            .cursor_pointer()
+                            .when(active, |this| {
+                                this.bg(theme.tab_active)
+                                    .text_color(theme.tab_active_foreground)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .border_1()
+                                    .border_color(theme.border)
+                            })
+                            .when(!active, |this| {
+                                this.bg(theme.tab_bar)
+                                    .text_color(theme.muted_foreground)
+                                    .border_1()
+                                    .border_color(theme.tab_bar)
+                                    .hover(|style| {
+                                        style
+                                            .bg(theme.list_hover)
+                                            .text_color(theme.foreground)
+                                            .border_color(theme.border.opacity(0.5))
+                                    })
+                            })
                             .child(
                                 div()
-                                    .absolute()
-                                    .invisible()
-                                    .when(active && !dirty, |this| this.visible())
-                                    .group_hover("tab", |style| style.visible())
-                                    .child(Icon::new(IconName::Close).xsmall()),
+                                    .flex_none()
+                                    .text_color(if active {
+                                        theme.tab_active_foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(Icon::new(IconName::FileText).xsmall()),
+                            )
+                            .child(div().truncate().child(name))
+                            .child(
+                                div()
+                                    .size(px(18.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .hover(|style| style.bg(theme.list_active))
+                                    .child(div().when(dirty, |this| {
+                                        this.child(
+                                            div()
+                                                .size(px(7.))
+                                                .rounded_full()
+                                                .bg(theme.primary),
+                                        )
+                                        .group_hover("tab", |style| style.invisible())
+                                    }))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .invisible()
+                                            .when(active && !dirty, |this| this.visible())
+                                            .group_hover("tab", |style| style.visible())
+                                            .child(Icon::new(IconName::Close).xsmall()),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            let doc = this.documents[ix].clone();
+                                            let id = doc.entity_id();
+                                            this.confirm_unsaved(
+                                                doc,
+                                                AfterConfirm::CloseDocument(id),
+                                                window,
+                                                cx,
+                                            );
+                                        }),
+                                    ),
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.activate(ix, window, cx)
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Middle,
                                 cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     let doc = this.documents[ix].clone();
@@ -1613,29 +1845,118 @@ impl Workspace {
                                         cx,
                                     );
                                 }),
-                            ),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| this.activate(ix, window, cx)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _, window, cx| {
-                            let doc = this.documents[ix].clone();
-                            let id = doc.entity_id();
-                            this.confirm_unsaved(doc, AfterConfirm::CloseDocument(id), window, cx);
-                        }),
-                    )
-            }))
+                            )
+                            .context_menu({
+                                let ws = ws_menu.clone();
+                                move |menu, _, _| {
+                                    let ws_close = ws.clone();
+                                    let ws_other = ws.clone();
+                                    let ws_right = ws.clone();
+                                    let doc = doc_weak.clone();
+
+                                    menu.item(
+                                        PopupMenuItem::new("Close").on_click(
+                                            move |_, window, cx| {
+                                                _ = ws_close.update(cx, |this, cx| {
+                                                    let id = doc.entity_id();
+                                                    this.confirm_unsaved(
+                                                        doc.clone(),
+                                                        AfterConfirm::CloseDocument(id),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            },
+                                        ),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Close Other Tabs")
+                                            .disabled(!has_other)
+                                            .on_click(move |_, window, cx| {
+                                                _ = ws_other.update(cx, |this, cx| {
+                                                    this.close_other_tabs_by_id(doc_id, window, cx);
+                                                });
+                                            }),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Close Tabs to the Right")
+                                            .disabled(is_last)
+                                            .on_click(move |_, window, cx| {
+                                                _ = ws_right.update(cx, |this, cx| {
+                                                    this.close_tabs_to_the_right_by_id(
+                                                        doc_id, window, cx,
+                                                    );
+                                                });
+                                            }),
+                                    )
+                                }
+                            })
+                    })),
+            )
+            .when(count > 1, |this| {
+                this.child(
+                    Button::new("tab-scroll-next")
+                        .ghost()
+                        .xsmall()
+                        .compact()
+                        .icon(Icon::new(IconName::ChevronRight))
+                        .tooltip("Next tab (Ctrl+Tab)")
+                        .disabled(active_ix + 1 >= count)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let count = this.documents.len();
+                            if count > 1 {
+                                let next = (this.active + 1) % count;
+                                this.activate(next, window, cx);
+                            }
+                        })),
+                )
+            })
             .child(
                 Button::new("new-tab")
                     .ghost()
                     .xsmall()
+                    .compact()
                     .icon(Icon::new(IconName::Plus))
                     .tooltip("New document")
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(NewFile), cx)),
             )
+            .when(count > 1, |this| {
+                let ws = workspace.clone();
+                this.child(
+                    Button::new("tab-overflow-menu")
+                        .ghost()
+                        .xsmall()
+                        .compact()
+                        .icon(Icon::new(IconName::Ellipsis))
+                        .tooltip("Tab options")
+                        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                            let ws_other = ws.clone();
+                            let ws_right = ws.clone();
+                            menu.item(
+                                PopupMenuItem::new("Close Other Tabs").on_click(
+                                    move |_, window, cx| {
+                                        _ = ws_other.update(cx, |this, cx| {
+                                            let keep_id = this.active_document().entity_id();
+                                            this.close_other_tabs_by_id(keep_id, window, cx);
+                                        });
+                                    },
+                                ),
+                            )
+                            .item(
+                                PopupMenuItem::new("Close Tabs to the Right").on_click(
+                                    move |_, window, cx| {
+                                        _ = ws_right.update(cx, |this, cx| {
+                                            let active_id = this.active_document().entity_id();
+                                            this.close_tabs_to_the_right_by_id(
+                                                active_id, window, cx,
+                                            );
+                                        });
+                                    },
+                                ),
+                            )
+                        }),
+                )
+            })
     }
 
     fn render_outline(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2320,6 +2641,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::copy_rich_text))
             .on_action(cx.listener(Self::reveal_in_folder))
             .on_action(cx.listener(Self::close_document))
+            .on_action(cx.listener(Self::close_other_tabs))
+            .on_action(cx.listener(Self::close_tabs_to_the_right))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::set_layout))
@@ -2536,5 +2859,15 @@ mod tests {
             suggested_file_name(&Analysis::default(), "html"),
             "Untitled.html"
         );
+    }
+
+    #[gpui_kit::test]
+    fn workspace_shows_tabs_by_default(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::themes::init(crate::settings::Settings::default(), cx);
+            let settings = AppSettings::get(cx);
+            assert!(settings.tabs);
+        });
     }
 }
