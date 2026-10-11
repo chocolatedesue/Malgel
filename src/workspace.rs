@@ -436,6 +436,7 @@ impl Workspace {
             if path.is_dir() {
                 // A directory argument (CLI or a second launch) becomes the
                 // sidebar root, the way VS Code opens a folder.
+                AppSettings::update(cx, |settings| settings.push_recent(&path));
                 self.file_tree
                     .update(cx, |tree, cx| tree.set_root(Some(path), cx));
                 continue;
@@ -848,9 +849,30 @@ impl Workspace {
     }
 
     fn open_recent(&mut self, action: &OpenRecent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = AppSettings::get(cx).recent_files.get(action.0).cloned() else {
+        let settings = AppSettings::get(cx);
+        let Some(path) = settings.recent_files.get(action.0).cloned() else {
             return;
         };
+        // Ctrl+R semantics: when the target is already the active document,
+        // fall through to the next most recent entry so the shortcut always
+        // moves somewhere (repeated presses toggle between the two latest).
+        let mut path = path;
+        if action.0 == 0
+            && path.is_file()
+            && self.active_document().read(cx).path() == Some(&path)
+        {
+            let Some(next) = settings.recent_files.get(1).cloned() else {
+                return;
+            };
+            path = next;
+        }
+        AppSettings::update(cx, |settings| settings.push_recent(&path));
+        if path.is_dir() {
+            self.file_tree
+                .update(cx, |tree, cx| tree.set_root(Some(path), cx));
+            self.sync_file_tree(cx);
+            return;
+        }
         self.open_paths(vec![path], window, cx);
     }
 
@@ -926,6 +948,7 @@ impl Workspace {
                 return;
             };
             _ = this.update_in(cx, |this, window, cx| {
+                AppSettings::update(cx, |settings| settings.push_recent(&folder));
                 this.file_tree
                     .update(cx, |tree, cx| tree.set_root(Some(folder), cx));
                 this.sync_file_tree(cx);
@@ -2877,6 +2900,7 @@ impl Workspace {
         let mut documents: Vec<PathBuf> = Vec::new();
         for path in paths {
             if path.is_dir() {
+                AppSettings::update(cx, |settings| settings.push_recent(&path));
                 self.file_tree
                     .update(cx, |tree, cx| tree.set_root(Some(path), cx));
             } else if path.is_file() {

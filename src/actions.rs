@@ -133,6 +133,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewFile, None),
         KeyBinding::new("secondary-o", Open, None),
+        KeyBinding::new("secondary-r", OpenRecent(0), workspace),
         KeyBinding::new("secondary-s", Save, workspace),
         KeyBinding::new("secondary-shift-s", SaveAs, workspace),
         KeyBinding::new("secondary-shift-e", ExportHtml, workspace),
