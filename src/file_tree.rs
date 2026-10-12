@@ -10,6 +10,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 
 use gpui_kit::{
@@ -72,6 +73,31 @@ pub struct TreeDrag {
 /// Whether the drag-and-drop invert key is held while tree entries drag:
 /// Ctrl on Windows and Linux, Option on macOS. Held, an in-app drag
 /// copies instead of moving, as in VS Code.
+/// How long a drag has to rest on a folder before it opens, as in VS Code.
+const HOVER_EXPAND_DELAY: Duration = Duration::from_millis(900);
+/// How close to an edge a drag has to be before the view scrolls along.
+const DRAG_SCROLL_EDGE: f32 = 28.;
+/// How often the view moves a row while a drag rests on an edge.
+const DRAG_SCROLL_STEP: Duration = Duration::from_millis(80);
+
+/// Which way the view scrolls while a drag rests on an edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragEdge {
+    Up,
+    Down,
+}
+
+/// Which edge of the list `y` rests on, if any.
+fn drag_edge(y: f32, top: f32, bottom: f32) -> Option<DragEdge> {
+    if y < top + DRAG_SCROLL_EDGE {
+        Some(DragEdge::Up)
+    } else if y > bottom - DRAG_SCROLL_EDGE {
+        Some(DragEdge::Down)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn invert_key_held(modifiers: &Modifiers) -> bool {
     if cfg!(target_os = "macos") {
         modifiers.alt
@@ -126,6 +152,10 @@ pub struct FileTree {
     /// Shared with the drag-over styles, which run without access to the
     /// tree's state: whether the invert key is held right now.
     drag_copy: Rc<Cell<bool>>,
+    /// A collapsed folder a drag is resting on, waiting to open.
+    hover_expand: Option<PathBuf>,
+    /// The edge a drag is resting on, while the view scrolls along.
+    drag_scroll: Option<DragEdge>,
     scroll: UniformListScrollHandle,
     refresh_task: Option<Task<()>>,
 }
@@ -144,6 +174,8 @@ impl FileTree {
             anchor: None,
             show_hidden: crate::themes::AppSettings::get(cx).show_hidden_entries,
             drag_copy: Rc::new(Cell::new(false)),
+            hover_expand: None,
+            drag_scroll: None,
             scroll: UniformListScrollHandle::new(),
             refresh_task: None,
         };
@@ -369,6 +401,81 @@ impl FileTree {
             self.refresh(cx);
         }
         cx.emit(FileTreeEvent::Copied { copied, failed });
+    }
+
+    /// Open a collapsed folder a drag is resting on, the way VS Code opens
+    /// the folder under the pointer after a moment.
+    fn note_hover_expand(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        if self.expanded.contains(&folder) {
+            self.hover_expand = None;
+            return;
+        }
+        if self
+            .hover_expand
+            .as_ref()
+            .is_some_and(|pending| *pending == folder)
+        {
+            return;
+        }
+        self.hover_expand = Some(folder.clone());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOVER_EXPAND_DELAY).await;
+            _ = this.update(cx, |this, cx| {
+                // Cleared either way: the pointer may have moved on, and a
+                // later hover waits afresh.
+                if this.hover_expand.as_ref() == Some(&folder) {
+                    this.hover_expand = None;
+                    if cx.has_active_drag() {
+                        this.expanded.insert(folder.clone());
+                        this.refresh(cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Start, move or stop the view scrolling under a drag that rests on an
+    /// edge, the way VS Code's explorer scrolls during a drag.
+    fn note_drag_edge(&mut self, edge: Option<DragEdge>, cx: &mut Context<Self>) {
+        if self.drag_scroll == edge {
+            return;
+        }
+        let starting = self.drag_scroll.is_none() && edge.is_some();
+        self.drag_scroll = edge;
+        if starting {
+            self.tick_drag_scroll(cx);
+        }
+    }
+
+    /// Move the view one row and come back for more while the drag stays on
+    /// an edge.
+    fn tick_drag_scroll(&mut self, cx: &mut Context<Self>) {
+        let Some(edge) = self.drag_scroll else {
+            return;
+        };
+        if !cx.has_active_drag() {
+            // The drop landed: the chain ends here.
+            self.drag_scroll = None;
+            return;
+        }
+        let last = self.rows.len().saturating_sub(1);
+        if last > 0 {
+            let top = self.scroll.logical_scroll_top_index().min(last);
+            let next = match edge {
+                DragEdge::Up => top.saturating_sub(1),
+                DragEdge::Down => (top + 1).min(last),
+            };
+            if next != top {
+                self.scroll
+                    .scroll_to_item(next, gpui_kit::ScrollStrategy::Top);
+            }
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DRAG_SCROLL_STEP).await;
+            _ = this.update(cx, |this, cx| this.tick_drag_scroll(cx));
+        })
+        .detach();
     }
 
     /// Record whether the invert key is held right now, so the drag-over
@@ -708,6 +815,7 @@ impl FileTree {
                             let folder = drop_path.clone();
                             let folder_for_drop = folder.clone();
                             let folder_for_style = folder.clone();
+                            let folder_for_hover = folder.clone();
                             this.on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                                 this.copy_paths_into(&folder, paths, cx)
                             }))
@@ -722,15 +830,25 @@ impl FileTree {
                                     cx,
                                 )
                             }))
-                            .drag_over::<TreeDrag>(
-                                move |style, drag: &TreeDrag, _, cx| {
-                                    if can_drop_all(&top_level(&drag.paths), &folder_for_style) {
-                                        style.bg(cx.theme().drop_target)
-                                    } else {
-                                        style
+                            .drag_over::<TreeDrag>(move |style, drag: &TreeDrag, _, cx| {
+                                if can_drop_all(&top_level(&drag.paths), &folder_for_style) {
+                                    style.bg(cx.theme().drop_target)
+                                } else {
+                                    style
+                                }
+                            })
+                            .on_drag_move::<TreeDrag>(cx.listener(
+                                move |this, event: &DragMoveEvent<TreeDrag>, _, cx| {
+                                    // Resting on a folder that would take the
+                                    // drag opens it, as VS Code does.
+                                    if can_drop_all(
+                                        &top_level(&event.drag(cx).paths),
+                                        &folder_for_hover,
+                                    ) {
+                                        this.note_hover_expand(folder_for_hover.clone(), cx);
                                     }
                                 },
-                            )
+                            ))
                         })
                         // A drop on a file row is rejected, as in VS Code;
                         // with the invert key it copies into the file's
@@ -868,6 +986,12 @@ impl Render for FileTree {
             .on_drag_move::<TreeDrag>(cx.listener(
                 |this, event: &DragMoveEvent<TreeDrag>, _, cx| {
                     this.note_drag_intent(&event.event.modifiers, cx);
+                    let edge = drag_edge(
+                        event.event.position.y.as_f32(),
+                        event.bounds.origin.y.as_f32(),
+                        (event.bounds.origin.y + event.bounds.size.height).as_f32(),
+                    );
+                    this.note_drag_edge(edge, cx);
                 },
             ))
             .child(header)
@@ -1049,6 +1173,21 @@ mod tests {
         assert_eq!(expanded, expected);
         // A second press has nothing left to collapse.
         assert!(!collapse_to_root(Some(root), &mut expanded));
+    }
+
+    #[test]
+    fn drag_edge_wants_the_pointer_near_an_end() {
+        // A 400px list: the first and last 28px scroll the view along.
+        assert_eq!(drag_edge(0., 0., 400.), Some(DragEdge::Up));
+        assert_eq!(drag_edge(27., 0., 400.), Some(DragEdge::Up));
+        assert_eq!(drag_edge(28., 0., 400.), None);
+        assert_eq!(drag_edge(200., 0., 400.), None);
+        assert_eq!(drag_edge(372., 0., 400.), None);
+        assert_eq!(drag_edge(373., 0., 400.), Some(DragEdge::Down));
+        assert_eq!(drag_edge(400., 0., 400.), Some(DragEdge::Down));
+        // A list that starts lower down works off its own top edge.
+        assert_eq!(drag_edge(100., 100., 400.), Some(DragEdge::Up));
+        assert_eq!(drag_edge(200., 100., 400.), None);
     }
 
     #[test]
