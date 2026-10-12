@@ -38,6 +38,7 @@ use crate::{
     actions::{AddToDictionary, CopyRichText, ReplaceMisspelling},
     analysis::{Analysis, content_hash},
     document::{LineEnding, display_name},
+    file_tree::TreeDrag,
     format::{self, Edit},
     images, preview_ext,
     session::{self, DiskStamp, Recovery},
@@ -256,6 +257,60 @@ impl DocumentView {
         self.path = Some(path);
         self.disk = self.path.as_deref().and_then(DiskStamp::of);
         cx.notify();
+    }
+
+    /// A copy of this document as it is right now — same text, path and
+    /// unsaved state — for a tab drop that copies (VS Code duplicates
+    /// tabs, dirty buffers included).
+    pub fn duplicate(&self, window: &mut Window, cx: &mut App) -> Entity<DocumentView> {
+        let text = self.editor.read(cx).value().to_string();
+        let path = self.path.clone();
+        let line_ending = self.line_ending;
+        let dirty = self.dirty;
+        let saved_hash = self.saved_hash;
+        cx.new(|cx| {
+            let mut copy = Self::new(text, path, line_ending, window, cx);
+            if dirty {
+                // Keep the copy's unsaved state true to the source:
+                // restore the saved hash so the current text counts as
+                // modified, the way `mark_missing` stamps the field.
+                copy.saved_hash = saved_hash;
+                copy.dirty = true;
+            }
+            copy
+        })
+    }
+
+    /// Insert a Markdown link to `path` at the caret, for a file dragged
+    /// from the sidebar into the text (VS Code's drop-into-editor).
+    pub fn insert_drop_link(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if !Self::shows_editor(cx) {
+            return;
+        }
+        let document_dir = self.path.as_deref().and_then(Path::parent);
+        let link = drop_link(path, document_dir);
+        let range = self.editor.read(cx).selected_range();
+        let end = range.start.saturating_add(link.len());
+        self.apply(
+            Edit {
+                range,
+                text: link,
+                selection: end..end,
+            },
+            window,
+            cx,
+        );
+        self.editor
+            .update(cx, |editor, cx| editor.focus(window, cx));
+    }
+
+    /// Files dropped onto the editor text insert Markdown links to them.
+    fn on_drop_tree_files(&mut self, drag: &TreeDrag, window: &mut Window, cx: &mut Context<Self>) {
+        for path in &drag.paths {
+            if !path.is_dir() {
+                self.insert_drop_link(path, window, cx);
+            }
+        }
     }
 
     /// A document displaying an image (PNG, JPEG, SVG, …) with zoom.
@@ -1293,6 +1348,11 @@ impl DocumentView {
             .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, _| {
                 this.set_scroll_driver(ScrollDriver::Editor)
             }))
+            // A file dragged from the sidebar onto the text inserts a
+            // Markdown link to it (VS Code's drop-into-editor); drops
+            // elsewhere in the window open the file instead.
+            .on_drop(cx.listener(Self::on_drop_tree_files))
+            .drag_over::<TreeDrag>(|style, _, _, cx| style.bg(cx.theme().drop_target))
             .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, _| {
                 this.set_scroll_driver(ScrollDriver::Editor)
             }))
@@ -1594,6 +1654,32 @@ fn link_path(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// A Markdown link pointing at `path` — image syntax for images —
+/// relative to the document's folder when the file lives under it.
+fn drop_link(target: &Path, document_dir: Option<&Path>) -> String {
+    let relative = document_dir
+        .and_then(|dir| target.strip_prefix(dir).ok())
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| target.to_string_lossy().into_owned());
+    let encoded = relative
+        .replace(' ', "%20")
+        .replace('(', "%28")
+        .replace(')', "%29");
+    if crate::document::is_image_path(target) {
+        let alt = target
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".into());
+        format!("![{alt}]({encoded})")
+    } else {
+        let name = target
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| encoded.clone());
+        format!("[{name}]({encoded})")
+    }
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC, for naming pasted images.

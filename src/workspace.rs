@@ -49,7 +49,7 @@ use crate::{
     document::{self, LineEnding, display_name},
     document_view::{DocumentEvent, DocumentView},
     docx, export,
-    file_tree::{FileTree, FileTreeEvent, TreeDrag},
+    file_tree::{FileTree, FileTreeEvent, TreeDrag, invert_key_held},
     format,
     links::{self, LinkTarget},
     pdf::{self, Paper},
@@ -160,6 +160,9 @@ pub struct Workspace {
     /// The tab bar's bounds as of the last drag move, so a drop outside the
     /// bar can clear the insertion line.
     tab_bar_bounds: Cell<Option<Bounds<Pixels>>>,
+    /// Whether the invert key is held while a tab drags: the drop then
+    /// duplicates the tab instead of moving it, as in VS Code.
+    tab_drag_copy: Cell<bool>,
     _watch_task: Task<()>,
     document_subscriptions: Vec<(EntityId, Vec<Subscription>)>,
     _subscriptions: Vec<Subscription>,
@@ -248,6 +251,7 @@ impl Workspace {
             last_session: None,
             tab_insertion: None,
             tab_bar_bounds: Cell::new(None),
+            tab_drag_copy: Cell::new(false),
             _watch_task: watch_task,
             document_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
@@ -405,9 +409,38 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.watch_document(&doc, window, cx);
+        self.documents.push(doc);
+        if activate {
+            self.activate(self.documents.len() - 1, window, cx);
+        }
+    }
+
+    /// Insert `doc` at `ix`, activating it (a duplicated tab lands where
+    /// it was dropped, the way VS Code copies tabs into place).
+    fn add_document_at(
+        &mut self,
+        doc: Entity<DocumentView>,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.watch_document(&doc, window, cx);
+        let ix = ix.min(self.documents.len());
+        self.documents.insert(ix, doc);
+        self.activate(ix, window, cx);
+    }
+
+    /// Follow a document's changes for the tab bar and notifications.
+    fn watch_document(
+        &mut self,
+        doc: &Entity<DocumentView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let subscriptions = vec![
-            cx.observe(&doc, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&doc, window, |_, _, event, window, cx| match event {
+            cx.observe(doc, |_, _, cx| cx.notify()),
+            cx.subscribe_in(doc, window, |_, _, event, window, cx| match event {
                 DocumentEvent::Notify(message) => {
                     window.push_notification(Notification::info(message.clone()), cx)
                 }
@@ -415,10 +448,6 @@ impl Workspace {
         ];
         self.document_subscriptions
             .push((doc.entity_id(), subscriptions));
-        self.documents.push(doc);
-        if activate {
-            self.activate(self.documents.len() - 1, window, cx);
-        }
     }
 
     fn remove_document(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1686,10 +1715,18 @@ impl Workspace {
     /// A tree entry dropped outside the file tree: a file opens, a folder
     /// is already the tree's root so there is nothing to do.
     fn on_drop_tree_drag(&mut self, drag: &TreeDrag, window: &mut Window, cx: &mut Context<Self>) {
-        if drag.path.is_dir() {
+        // Files open (one tab each); folders do nothing here, as in VS
+        // Code, where in-app folder drags don't target the editor.
+        let files: Vec<PathBuf> = drag
+            .paths
+            .iter()
+            .filter(|path| !path.is_dir())
+            .cloned()
+            .collect();
+        if files.is_empty() {
             return;
         }
-        self.open_paths(vec![drag.path.clone()], window, cx);
+        self.open_paths(files, window, cx);
     }
 
     /// Record where the pointer would land a dragged tab: before or after
@@ -1709,6 +1746,35 @@ impl Workspace {
             self.tab_insertion = insertion;
             cx.notify();
         }
+    }
+
+    /// Land a dropped tab: a move, or with the invert key held a copy
+    /// (duplicate) at the insertion point, as in VS Code.
+    fn finish_tab_drop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(insertion) = self.tab_insertion.take() else {
+            return;
+        };
+        if self.tab_drag_copy.get() {
+            self.duplicate_tab(insertion.source, insertion.gap, window, cx);
+        } else {
+            self.move_tab(insertion.source, insertion.gap, window, cx);
+        }
+    }
+
+    /// Duplicate the tab at `from`, placing the copy at `gap`. The copy
+    /// keeps the source's text and unsaved state.
+    fn duplicate_tab(
+        &mut self,
+        from: usize,
+        gap: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.documents.get(from).cloned() else {
+            return;
+        };
+        let copy = doc.update(cx, |doc, cx| doc.duplicate(window, cx));
+        self.add_document_at(copy, gap, window, cx);
     }
 
     /// Land a dragged tab at `to_gap`, the way VS Code reorders tabs.
@@ -2024,16 +2090,18 @@ impl Workspace {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.tab_bar)
-            // While a tab drags, remember the bar's bounds and, on drop,
-            // land the tab at the insertion point the tabs reported.
+            // While a tab drags, remember the bar's bounds, the invert
+            // key's state, and, on drop, land the tab at the insertion
+            // point the tabs reported.
             .on_drag_move::<TabDrag>(cx.listener(|this, event: &DragMoveEvent<TabDrag>, _, _| {
                 this.tab_bar_bounds.set(Some(event.bounds));
+                let copy = invert_key_held(&event.event.modifiers);
+                if this.tab_drag_copy.get() != copy {
+                    this.tab_drag_copy.set(copy);
+                }
             }))
             .on_drop(cx.listener(|this, _: &TabDrag, window, cx| {
-                let insertion = this.tab_insertion.take();
-                if let Some(insertion) = insertion {
-                    this.move_tab(insertion.source, insertion.gap, window, cx);
-                }
+                this.finish_tab_drop(window, cx);
             }))
             .when(count > 1, |this| {
                 this.child(
