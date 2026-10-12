@@ -262,6 +262,17 @@ impl FileTree {
         cx.notify();
     }
 
+    /// Collapse every folder but the root, the way VS Code's "Collapse Folders
+    /// in Explorer" does.
+    fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        if !collapse_to_root(self.root.as_deref(), &mut self.expanded) {
+            return;
+        }
+        self.rebuild_rows();
+        self.scroll_to_active();
+        cx.notify();
+    }
+
     /// Copy the dropped paths into `target` (VS Code copies an OS drop into
     /// the folder it lands on), then re-list and report the outcome.
     fn copy_paths_into(&mut self, target: &Path, paths: &ExternalPaths, cx: &mut Context<Self>) {
@@ -616,12 +627,26 @@ impl Render for FileTree {
             .text_color(theme.muted_foreground)
             .child(div().truncate().child(name.to_uppercase()))
             .child(
-                Button::new("open-folder")
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(IconName::FolderOpen))
-                    .tooltip("Open folder…")
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
+                h_flex()
+                    .items_center()
+                    .child(
+                        Button::new("collapse-folders")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::FolderClosed))
+                            .tooltip("Collapse folders")
+                            .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
+                    )
+                    .child(
+                        Button::new("open-folder")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::FolderOpen))
+                            .tooltip("Open folder…")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenFolder), cx)
+                            }),
+                    ),
             );
 
         let body = if self.root.is_none() {
@@ -687,6 +712,13 @@ impl Render for FileTree {
             .child(header)
             .child(body)
     }
+}
+
+/// Keep only the root expanded; returns whether anything actually collapsed.
+fn collapse_to_root(root: Option<&Path>, expanded: &mut HashSet<PathBuf>) -> bool {
+    let before = expanded.len();
+    expanded.retain(|folder| Some(folder.as_path()) == root);
+    expanded.len() != before
 }
 
 /// A path's file name for dialog text, falling back to the whole path.
@@ -822,5 +854,23 @@ mod tests {
             .collect();
         assert!(all.contains(&".git".to_string()));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn collapse_to_root_keeps_only_the_root_expanded() {
+        let root = Path::new("/work/notes");
+        let mut expanded: HashSet<PathBuf> = [
+            root,
+            Path::new("/work/notes/2026"),
+            Path::new("/work/notes/2026/feb"),
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        assert!(collapse_to_root(Some(root), &mut expanded));
+        assert_eq!(expanded, [root.to_path_buf()].into_iter().collect());
+        // A second press has nothing left to collapse.
+        assert!(!collapse_to_root(Some(root), &mut expanded));
     }
 }
