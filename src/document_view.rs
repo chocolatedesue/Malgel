@@ -11,9 +11,9 @@ use std::{
 
 use gpui_kit::{
     App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
-    Focusable as _, HighlightStyle, Image, InteractiveElement as _, IntoElement, KeyDownEvent,
-    ListOffset, MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollWheelEvent, SharedString,
-    Styled as _, Subscription, Task, Window,
+    FocusHandle, Focusable as _, HighlightStyle, Image, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ListOffset, MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollWheelEvent,
+    SharedString, Styled as _, Subscription, Task, Window,
     base::{
         TextView, TextViewState,
         input::{Diagnostic, DiagnosticSeverity},
@@ -244,6 +244,19 @@ impl DocumentView {
 
     pub fn preview(&self) -> &Entity<TextViewState> {
         &self.preview
+    }
+
+    /// The focus handle of the PDF or image viewer this document shows, if it
+    /// shows one. Those two replace the editor and the preview in `render`, so
+    /// the keyboard has to go to them: focusing a view that is not in the tree
+    /// leaves every shortcut dead, which is what happened while a PDF was up.
+    pub fn media_focus_handle(&self, cx: &App) -> Option<FocusHandle> {
+        if let Some(pdf) = &self.pdf {
+            return Some(pdf.read(cx).focus_handle(cx));
+        }
+        self.image
+            .as_ref()
+            .map(|image| image.read(cx).focus_handle(cx))
     }
 
     pub fn path(&self) -> Option<&PathBuf> {
