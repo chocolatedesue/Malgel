@@ -457,6 +457,10 @@ jobs:
       GH_REPO: ${{ github.repository }}
       # The same draft the macOS job names.
       TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.publish == 'release' && format('v{0}', needs.version.outputs.version) || format('v{0}-build.{1}', needs.version.outputs.version, github.run_number) }}
+      # What the macOS job actually did, so the notes can say it instead of
+      # claiming a signed, notarized app whenever none was signed.
+      HAS_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      HAS_NOTARY: ${{ (secrets.APPLE_API_KEY != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != '') || (secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '') }}
     steps:
       # Only for hand-written release notes, if the tag has any.
       - uses: actions/checkout@v4
@@ -477,9 +481,19 @@ jobs:
       - name: Publish the test build as a pre-release
         if: github.event_name == 'workflow_dispatch' && inputs.publish == 'prerelease'
         run: |
+          # Describe the macOS package that was really built. Without the
+          # signing secrets the app is only ad-hoc signed, and macOS refuses
+          # a plain first launch of a downloaded copy.
+          if [[ "$HAS_SIGNING" == true && "$HAS_NOTARY" == true ]]; then
+            macos_note="The macOS app is signed and notarized."
+          elif [[ "$HAS_SIGNING" == true ]]; then
+            macos_note="The macOS app is signed with a Developer ID but not notarized, so macOS may still ask before the first launch."
+          else
+            macos_note="The macOS app is **not** signed with a Developer ID and not notarized (this fork sets no Apple signing secrets), so macOS refuses a plain first launch: right-click the app and choose Open, or run \`xattr -dr com.apple.quarantine /Applications/Malgel.app\`."
+          fi
           gh release edit "$TAG" --draft=false --prerelease \
             --title "Malgel ${{ needs.version.outputs.version }} test build ${{ github.run_number }}" \
-            --notes "A test build of Malgel ${{ needs.version.outputs.version }} from $GITHUB_SHA, not a finished release. The macOS app is signed and notarized; the Windows files are unsigned, so Windows may warn before running them."
+            --notes "A test build of Malgel ${{ needs.version.outputs.version }} from $GITHUB_SHA, not a finished release. $macos_note The Windows files are unsigned, so Windows may warn before running them."
       - name: Publish the release
         if: github.event_name == 'push' || inputs.publish == 'release'
         run: |
