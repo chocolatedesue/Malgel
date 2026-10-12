@@ -1,6 +1,6 @@
 //! Image viewing support: opens PNG/JPEG/WebP/GIF/BMP/TIFF/ICO/SVG files
 //! with the same zoom controls the PDF viewer has — fit width, fit page,
-//! actual size, a zoom percentage menu, Ctrl/⌘ + wheel and trackpad pinch.
+//! actual size, a zoom percentage menu, the mouse wheel and trackpad pinch.
 
 use std::{path::Path, path::PathBuf, sync::Arc};
 
@@ -210,21 +210,22 @@ impl ImageView {
         }
     }
 
-    /// Holding Ctrl (⌘ on macOS) turns the wheel into zoom, the way Preview
-    /// and VS Code's image preview do. Without the modifier the wheel is left
-    /// to the scroll area, so the view still scrolls as usual.
+    /// One notch of a mouse wheel zooms, as in the diagram viewer and most
+    /// image viewers. A trackpad zooms only while Ctrl (⌘ on macOS) is held —
+    /// otherwise it is left to the scroll area, so the image still scrolls
+    /// the way a trackpad's two-finger gesture is expected to.
     fn on_scroll(
         &mut self,
         event: &ScrollWheelEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !event.modifiers.secondary() {
-            return;
-        }
         let factor = match event.delta {
             ScrollDelta::Lines(lines) => WHEEL_STEP.powf(lines.y.clamp(-1., 1.)),
-            ScrollDelta::Pixels(delta) => (f32::from(delta.y) / 200.).exp(),
+            ScrollDelta::Pixels(delta) if event.modifiers.secondary() => {
+                (f32::from(delta.y) / 200.).exp()
+            }
+            ScrollDelta::Pixels(_) => return,
         };
         self.set_zoom(self.zoom * factor, cx);
         // The scroll area behind this element would otherwise scroll the

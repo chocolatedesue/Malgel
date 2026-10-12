@@ -16,7 +16,8 @@ use std::{
 
 use gpui_kit::{
     App, Context, ElementId, FocusHandle, Focusable, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy, Size, Styled as _, Window,
+    IntoElement, ParentElement as _, PinchEvent, Pixels, Render, ScrollDelta, ScrollStrategy,
+    ScrollWheelEvent, Size, Styled as _, Window,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -48,6 +49,8 @@ pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 8.0;
 /// Multiplier for zoom in / out steps.
 pub const ZOOM_STEP: f32 = 1.25;
+/// Multiplier for one notch of the mouse wheel.
+const WHEEL_STEP: f32 = 1.2;
 
 /// Gap between pages, in logical pixels.
 const PAGE_GAP: f32 = 20.;
@@ -336,6 +339,32 @@ impl PdfView {
             self.zoom = clamped;
             cx.notify();
         }
+    }
+
+    /// Command or Control plus the wheel zooms the pages, as in the image
+    /// viewer. A bare wheel is left to the list behind this element, which
+    /// scrolls the document the way a PDF reader does.
+    fn on_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.modifiers.secondary() {
+            return;
+        }
+        let factor = match event.delta {
+            ScrollDelta::Lines(lines) => WHEEL_STEP.powf(lines.y.clamp(-1., 1.)),
+            ScrollDelta::Pixels(delta) => (f32::from(delta.y) / 200.).exp(),
+        };
+        self.set_zoom(self.zoom * factor, cx);
+        // Otherwise the list scrolls the document at the same time as the
+        // zoom resizes it.
+        cx.stop_propagation();
+    }
+
+    fn on_pinch(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
+        self.set_zoom(self.zoom * (1. + event.delta), cx);
     }
 
     /// Scale the widest page to the viewport width.
@@ -710,6 +739,8 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_in(cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_out(cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.reset_zoom(cx)))
+            .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .on_pinch(cx.listener(|this, event: &PinchEvent, _, cx| this.on_pinch(event, cx)))
             .child(self.render_toolbar(cx))
             .child(self.render_content(cx))
     }
