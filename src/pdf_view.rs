@@ -4,7 +4,9 @@
 //! crisp SVG sheets with `hayro_svg::convert` **on demand**: only the pages in
 //! view are rendered, and rendered pages are cached, so long documents open
 //! and scroll smoothly. The viewer is one continuous vertical scroll with
-//! fit-width / fit-page / custom zoom and page navigation.
+//! fit-width / fit-page / custom zoom and page navigation, and the gestures
+//! `zoom` documents and the image viewer share: Command/Control with the wheel
+//! zooms, and a double click swaps between the fit and a closer look.
 
 use std::{
     collections::HashMap,
@@ -16,8 +18,8 @@ use std::{
 
 use gpui_kit::{
     Anchor, App, Context, ElementId, FocusHandle, Focusable, Image, ImageFormat,
-    InteractiveElement as _, IntoElement, ParentElement as _, PinchEvent, Pixels, Render,
-    ScrollDelta, ScrollStrategy, ScrollWheelEvent, Size, Styled as _, Window,
+    InteractiveElement as _, IntoElement, MouseDownEvent, ParentElement as _, PinchEvent, Pixels,
+    Render, ScrollDelta, ScrollStrategy, ScrollWheelEvent, Size, Styled as _, Window,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -362,6 +364,21 @@ impl PdfView {
 
     fn on_pinch(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
         self.set_zoom(self.zoom * (1. + event.delta), cx);
+    }
+
+    /// Double-clicking swaps between the fitted view and a closer look, the
+    /// way a double-click does in the diagram viewer and in the image viewer:
+    /// from a fit it doubles what the fit resolved to, and from a zoom the
+    /// user set it goes back to fitting the page.
+    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.click_count != 2 {
+            return;
+        }
+        if self.fit == FitMode::Custom {
+            self.fit_page(cx);
+        } else {
+            self.set_zoom(self.zoom * 2., cx);
+        }
     }
 
     /// Scale the widest page to the viewport width.
@@ -763,8 +780,19 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.reset_zoom(cx)))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_pinch(cx.listener(|this, event: &PinchEvent, _, cx| this.on_pinch(event, cx)))
+            .on_mouse_down(cx.listener(Self::on_mouse_down))
             .child(self.render_toolbar(cx))
-            .child(self.render_content(cx))
+            // Double-click fits the page or zooms back out, the way the
+            // diagram viewer does. On the content, not the whole view, so a
+            // double-click on a toolbar button stays a double click on a
+            // button.
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .on_mouse_down(cx.listener(Self::on_mouse_down))
+                    .child(self.render_content(cx)),
+            )
     }
 }
 

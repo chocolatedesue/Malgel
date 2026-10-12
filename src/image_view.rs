@@ -1,13 +1,16 @@
 //! Image viewing support: opens PNG/JPEG/WebP/GIF/BMP/TIFF/ICO/SVG files
 //! with the same zoom controls the PDF viewer has — fit width, fit page,
 //! actual size, a zoom percentage menu, the mouse wheel and trackpad pinch.
+//! The gestures are the ones `zoom` documents and the diagram viewer shares:
+//! the wheel zooms, Command/Control with the wheel zooms on a trackpad, and a
+//! double click swaps between the fit and a closer look.
 
 use std::{path::Path, path::PathBuf, sync::Arc};
 
 use gpui_kit::{
     Anchor, App, Context, FocusHandle, Focusable, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, ParentElement as _, PinchEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
-    Size, Styled as _, Window,
+    IntoElement, MouseDownEvent, ParentElement as _, PinchEvent, Pixels, Render, ScrollDelta,
+    ScrollWheelEvent, Size, Styled as _, Window,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -208,6 +211,24 @@ impl ImageView {
         // The scroll area behind this element would otherwise scroll the
         // image at the same time as the zoom resizes it.
         cx.stop_propagation();
+    }
+
+    /// Double-clicking swaps between the fitted view and a closer look, the
+    /// way a double-click does in the diagram viewer: from a fit it doubles
+    /// what the fit resolved to, and from a zoom the user set it goes back to
+    /// fitting the page.
+    fn on_double_click(&mut self, cx: &mut Context<Self>) {
+        if self.fit == FitMode::Custom {
+            self.fit_page(cx);
+        } else {
+            self.set_zoom(self.zoom * 2., cx);
+        }
+    }
+
+    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.click_count == 2 {
+            self.on_double_click(cx);
+        }
     }
 
     fn on_pinch(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
@@ -416,8 +437,19 @@ impl Render for ImageView {
             .on_action(
                 cx.listener(|this, _: &crate::actions::ZoomReset, _, cx| this.reset_zoom(cx)),
             )
+            .on_mouse_down(cx.listener(Self::on_mouse_down))
             .child(self.render_toolbar(cx))
-            .child(self.render_content(cx))
+            // Double-click fits the page or zooms back out, the way the
+            // diagram viewer does. On the content, not the whole view, so a
+            // double-click on a toolbar button stays a double click on a
+            // button.
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .on_mouse_down(cx.listener(Self::on_mouse_down))
+                    .child(self.render_content(cx)),
+            )
     }
 }
 
