@@ -15,7 +15,7 @@ use std::{
 use gpui_kit::{
     Anchor, App, AppContext as _, Bounds, Context, DragMoveEvent, Entity, EntityId, ExternalPaths,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, PathPromptOptions, Pixels, Render, SharedString,
+    MouseDownEvent, ParentElement as _, PathPromptOptions, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, WindowBounds,
     assets::IconName,
     base::Disableable as _,
@@ -80,13 +80,34 @@ enum AfterConfirm {
     Quit,
 }
 
+/// Where a plain click in the file tree puts the file it opens: `Some(ix)`
+/// takes over the document at `ix`, `None` adds a tab.
+///
+/// The preview slot is the tab the last click left behind, while it is
+/// untouched; an empty editor is reused first, as VS Code does.
+fn preview_target(
+    preview: Option<usize>,
+    preview_untouched: bool,
+    active: usize,
+    active_blank: bool,
+) -> Option<usize> {
+    match preview.filter(|_| preview_untouched) {
+        Some(ix) => Some(ix),
+        None => active_blank.then_some(active),
+    }
+}
+
 /// Where a document being opened goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Placement {
     /// A new tab when tabs are on, otherwise in place of the current
     /// document.
     Default,
+    /// A tab of its own, whatever the settings say.
     NewTab,
+    /// The slot a plain click in the file tree reuses, the way VS Code's
+    /// preview editor is replaced by the next file clicked.
+    Preview,
     ReplaceActive,
 }
 
@@ -142,6 +163,10 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     documents: Vec<Entity<DocumentView>>,
     active: usize,
+    /// The document shown in the preview slot, if any: the next file opened
+    /// with a plain click takes its place, until it is edited or opened for
+    /// good, the way VS Code's preview tab behaves.
+    preview: Option<EntityId>,
     headings: Entity<CommandState>,
     quick_open: Entity<CommandState>,
     file_tree: Entity<FileTree>,
@@ -188,7 +213,16 @@ impl Workspace {
                 &file_tree,
                 window,
                 |this, _, event, window, cx| match event {
-                    FileTreeEvent::Open(path) => this.open_paths(vec![path.clone()], window, cx),
+                    FileTreeEvent::Open { path, preview } => this.open_paths(
+                        vec![path.clone()],
+                        if preview {
+                            Placement::Preview
+                        } else {
+                            Placement::NewTab
+                        },
+                        window,
+                        cx,
+                    ),
                     FileTreeEvent::Copied { copied, failed } => {
                         let message = match (copied, failed) {
                             (0, _) => "Nothing was copied: the drop target sits inside the source, or the files couldn’t be written.".to_string(),
@@ -243,6 +277,7 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             documents: Vec::new(),
             active: 0,
+            preview: None,
             headings,
             quick_open,
             file_tree,
@@ -368,7 +403,7 @@ impl Workspace {
         // otherwise update_in is rejected while the window is on the stack.
         if !deferred_open.is_empty() {
             cx.defer_in(window, move |this, window, cx| {
-                this.open_paths(deferred_open, window, cx);
+                this.open_paths(deferred_open, Placement::Default, window, cx);
             });
         }
         self.focus_active(window, cx);
@@ -442,7 +477,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let subscriptions = vec![
-            cx.observe(doc, |_, _, cx| cx.notify()),
+            cx.observe(doc, |this, doc, cx| {
+                // Editing a file takes it out of the preview slot: from then
+                // on it keeps a tab of its own, as in VS Code.
+                if doc.read(cx).is_dirty() {
+                    this.unpreview(doc.entity_id());
+                }
+                cx.notify()
+            }),
             cx.subscribe_in(doc, window, |_, _, event, window, cx| match event {
                 DocumentEvent::Notify(message) => {
                     window.push_notification(Notification::info(message.clone()), cx)
@@ -461,6 +503,7 @@ impl Workspace {
         doc.update(cx, |doc, _| doc.discard_recovery());
         self.document_subscriptions
             .retain(|(subscribed, _)| *subscribed != id);
+        self.unpreview(id);
         if self.documents.is_empty() {
             let doc =
                 cx.new(|cx| DocumentView::new(String::new(), None, LineEnding::Lf, window, cx));
@@ -479,8 +522,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let old = self.active_document().entity_id();
-        let position = self.active;
+        self.replace_document_at(self.active, doc, window, cx);
+    }
+
+    /// Put `doc` where the document at `position` sits, showing it.
+    fn replace_document_at(
+        &mut self,
+        position: usize,
+        doc: Entity<DocumentView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let position = position.min(self.documents.len().saturating_sub(1));
+        let old = self.documents[position].entity_id();
         self.add_document(doc, false, window, cx);
         let new = self.documents.pop().expect("just added");
         self.documents.insert(position, new);
@@ -490,7 +544,58 @@ impl Workspace {
             self.document_subscriptions
                 .retain(|(subscribed, _)| *subscribed != old);
         }
+        if self.preview == Some(old) {
+            self.preview = None;
+        }
         self.activate(position, window, cx);
+    }
+
+    /// Show `doc` where `placement` asks: the preview slot, in place of the
+    /// active document, or as a tab of its own.
+    fn place_document(
+        &mut self,
+        doc: Entity<DocumentView>,
+        placement: Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(placement, Placement::Preview) {
+            let id = doc.entity_id();
+            // The slot a plain click reuses: the preview tab the last click
+            // left behind (while it is untouched), or a blank tab, which
+            // would otherwise sit there for ever. Without one the file gets
+            // a tab of its own, which the next click takes over.
+            let shown = self.preview.and_then(|id| self.document_index(id));
+            let untouched = shown.is_some_and(|ix| !self.documents[ix].read(cx).is_dirty());
+            let blank = self.active_document().read(cx).is_blank();
+            match preview_target(shown, untouched, self.active, blank) {
+                Some(ix) => self.replace_document_at(ix, doc, window, cx),
+                None => self.add_document(doc, true, window, cx),
+            }
+            self.preview = Some(id);
+            return;
+        }
+        let active = self.active_document().read(cx);
+        let replace = active.is_blank()
+            || match placement {
+                Placement::Default => !AppSettings::get(cx).tabs,
+                Placement::NewTab => false,
+                Placement::ReplaceActive => true,
+                Placement::Preview => unreachable!("handled above"),
+            };
+        if replace {
+            self.replace_active(doc, window, cx);
+        } else {
+            self.add_document(doc, true, window, cx);
+        }
+    }
+
+    /// Give the preview slot up, so the document keeps its tab. Editing a
+    /// file, or opening it for good, does this, as in VS Code.
+    fn unpreview(&mut self, id: EntityId) {
+        if self.preview == Some(id) {
+            self.preview = None;
+        }
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -523,7 +628,13 @@ impl Workspace {
 
     /// Open `paths`: as tabs when tabs are on, otherwise in place of the
     /// current document (asking about unsaved changes first).
-    fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        placement: Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tabs = AppSettings::get(cx).tabs;
         for path in paths {
             let path = path.canonicalize().unwrap_or(path);
@@ -540,6 +651,12 @@ impl Workspace {
                 .iter()
                 .position(|doc| doc.read(cx).path() == Some(&path))
             {
+                // Opening a file that only holds the preview slot gives it a
+                // tab of its own, the way double-clicking does in VS Code.
+                if !matches!(placement, Placement::Preview) {
+                    let id = self.documents[ix].entity_id();
+                    self.unpreview(id);
+                }
                 self.activate(ix, window, cx);
                 continue;
             }
@@ -554,7 +671,7 @@ impl Workspace {
                 );
                 return;
             }
-            self.load_path(path, Placement::Default, None, window, cx);
+            self.load_path(path, placement, None, window, cx);
         }
     }
 
@@ -580,18 +697,7 @@ impl Workspace {
                     AppSettings::update(cx, |settings| settings.push_recent(&path));
                     let doc =
                         cx.new(|cx| DocumentView::new_pdf(path.clone(), document, window, cx));
-                    let active = self.active_document().read(cx);
-                    let replace = active.is_blank()
-                        || match placement {
-                            Placement::Default => !AppSettings::get(cx).tabs,
-                            Placement::NewTab => false,
-                            Placement::ReplaceActive => true,
-                        };
-                    if replace {
-                        self.replace_active(doc.clone(), window, cx);
-                    } else {
-                        self.add_document(doc.clone(), true, window, cx);
-                    }
+                    self.place_document(doc, placement, window, cx);
                 }
                 Err(err) => {
                     AppSettings::update(cx, |settings| {
@@ -618,18 +724,7 @@ impl Workspace {
                         let doc = cx.new(|cx| {
                             DocumentView::new_image(path.clone(), image, width, height, window, cx)
                         });
-                        let active = self.active_document().read(cx);
-                        let replace = active.is_blank()
-                            || match placement {
-                                Placement::Default => !AppSettings::get(cx).tabs,
-                                Placement::NewTab => false,
-                                Placement::ReplaceActive => true,
-                            };
-                        if replace {
-                            self.replace_active(doc.clone(), window, cx);
-                        } else {
-                            self.add_document(doc.clone(), true, window, cx);
-                        }
+                        self.place_document(doc, placement, window, cx);
                     }
                     Err(err) => {
                         self.notify_error(
@@ -674,18 +769,7 @@ impl Workspace {
                             cx,
                         )
                     });
-                    let active = this.active_document().read(cx);
-                    let replace = active.is_blank()
-                        || match placement {
-                            Placement::Default => !AppSettings::get(cx).tabs,
-                            Placement::NewTab => false,
-                            Placement::ReplaceActive => true,
-                        };
-                    if replace {
-                        this.replace_active(doc.clone(), window, cx);
-                    } else {
-                        this.add_document(doc.clone(), true, window, cx);
-                    }
+                    this.place_document(doc.clone(), placement, window, cx);
                     if let Some(anchor) = anchor {
                         this.reveal_anchor(&doc, &anchor, window, cx);
                     }
@@ -1009,7 +1093,7 @@ impl Workspace {
             self.sync_file_tree(cx);
             return;
         }
-        self.open_paths(vec![path], window, cx);
+        self.open_paths(vec![path], Placement::Default, window, cx);
     }
 
     /// Open a system terminal in the current folder (VS Code Ctrl+`).
@@ -1707,7 +1791,7 @@ impl Workspace {
                 .update(cx, |tree, cx| tree.set_root(Some(folder.clone()), cx));
         }
         if !documents.is_empty() {
-            self.open_paths(documents, window, cx);
+            self.open_paths(documents, Placement::Default, window, cx);
             return;
         }
         if folders.is_empty() {
@@ -1729,7 +1813,7 @@ impl Workspace {
         if files.is_empty() {
             return;
         }
-        self.open_paths(files, window, cx);
+        self.open_paths(files, Placement::Default, window, cx);
     }
 
     /// Record where the pointer would land a dragged tab: before or after
@@ -2003,7 +2087,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_paths(vec![action.0.clone()], window, cx);
+        self.open_paths(vec![action.0.clone()], Placement::Default, window, cx);
     }
 
     fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -2235,6 +2319,10 @@ impl Workspace {
                         let doc_id = doc_entity.entity_id();
                         let active = ix == active_ix;
                         let dirty = doc.is_dirty();
+                        // The preview tab reads like a draft: the next file
+                        // clicked replaces it until it is edited or opened
+                        // for good, the way VS Code marks its preview.
+                        let is_preview = self.preview == Some(doc_id);
                         let is_last = ix + 1 >= count;
                         let has_other = count > 1;
                         let name = doc.name().to_string();
@@ -2298,7 +2386,12 @@ impl Workspace {
                                     })
                                     .child(Icon::new(IconName::FileText).xsmall()),
                             )
-                            .child(div().truncate().child(name))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .when(is_preview, |this| this.italic())
+                                    .child(name),
+                            )
                             .child(
                                 div()
                                     .size(px(18.))
@@ -2374,7 +2467,13 @@ impl Workspace {
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    // A double click keeps the file: the
+                                    // preview slot is given up, as in VS
+                                    // Code.
+                                    if event.click_count > 1 {
+                                        this.unpreview(doc_id);
+                                    }
                                     this.activate(ix, window, cx)
                                 }),
                             )
@@ -3396,7 +3495,7 @@ impl Workspace {
             }
         }
         if !documents.is_empty() {
-            self.open_paths(documents, window, cx);
+            self.open_paths(documents, Placement::Default, window, cx);
         }
     }
 }
@@ -3429,6 +3528,19 @@ pub fn restored_bounds(cx: &App) -> Option<WindowBounds> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_takes_over_the_preview_slot_in_order() {
+        // The preview tab, while it is untouched…
+        assert_eq!(preview_target(Some(2), true, 0, true), Some(2));
+        assert_eq!(preview_target(Some(2), true, 0, false), Some(2));
+        // …then an empty editor…
+        assert_eq!(preview_target(Some(2), false, 0, true), Some(0));
+        assert_eq!(preview_target(None, false, 1, true), Some(1));
+        // …and otherwise a tab of its own, which the next click takes over.
+        assert_eq!(preview_target(Some(2), false, 0, false), None);
+        assert_eq!(preview_target(None, false, 1, false), None);
+    }
 
     #[test]
     fn groups_thousands() {
