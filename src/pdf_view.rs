@@ -372,7 +372,8 @@ impl PdfView {
     /// from a fit it doubles what the fit resolved to, and from a zoom the
     /// user set it goes back to fitting the page.
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if event.click_count != 2 || event.pressed_button != Some(MouseButton::Left) {
+        // Only the left button gets here; the wiring asks for it.
+        if event.click_count != 2 {
             return;
         }
         if self.fit == FitMode::Custom {
