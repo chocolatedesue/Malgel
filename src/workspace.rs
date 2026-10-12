@@ -80,6 +80,30 @@ enum AfterConfirm {
     Quit,
 }
 
+/// Which view of the active document should hold the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyboardTarget {
+    /// The PDF or image viewer, which stands in for both of the others.
+    Media,
+    Editor,
+    Preview,
+}
+
+/// A PDF or an image is rendered *instead of* the editor and the preview, so
+/// the keyboard has to go to that viewer. Focusing the editor anyway points
+/// the keyboard at an element that is not in the render tree — no key binding
+/// matches it and every shortcut stops working, which is what happened while a
+/// PDF was open.
+fn keyboard_target(has_media: bool, shows_editor: bool, focus_mode: bool) -> KeyboardTarget {
+    if has_media {
+        KeyboardTarget::Media
+    } else if shows_editor || focus_mode {
+        KeyboardTarget::Editor
+    } else {
+        KeyboardTarget::Preview
+    }
+}
+
 /// Where a plain click in the file tree puts the file it opens: `Some(ix)`
 /// takes over the document at `ix`, `None` adds a tab.
 ///
@@ -611,11 +635,14 @@ impl Workspace {
 
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
         let doc = self.active_document().read(cx);
-        let focus = if AppSettings::get(cx).layout.shows_editor() || AppSettings::get(cx).focus_mode
-        {
-            doc.editor().focus_handle(cx)
-        } else {
-            doc.preview().read(cx).focus_handle().clone()
+        let shows_editor = AppSettings::get(cx).layout.shows_editor();
+        let focus_mode = AppSettings::get(cx).focus_mode;
+        let focus = match keyboard_target(doc.is_media(), shows_editor, focus_mode) {
+            KeyboardTarget::Media => doc
+                .media_focus_handle(cx)
+                .unwrap_or_else(|| doc.editor().focus_handle(cx)),
+            KeyboardTarget::Editor => doc.editor().focus_handle(cx),
+            KeyboardTarget::Preview => doc.preview().read(cx).focus_handle().clone(),
         };
         window.defer(cx, move |window, cx| focus.focus(window, cx));
     }
@@ -3528,6 +3555,28 @@ pub fn restored_bounds(cx: &App) -> Option<WindowBounds> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pdf_keeps_the_keyboard_on_its_own_viewer() {
+        // Whatever the layout says, a PDF or an image is shown by its viewer
+        // and by nothing else, so that is where the keyboard has to go.
+        for shows_editor in [true, false] {
+            for focus_mode in [true, false] {
+                assert_eq!(
+                    keyboard_target(true, shows_editor, focus_mode),
+                    KeyboardTarget::Media,
+                    "a media document must not send the keyboard to the editor"
+                );
+            }
+        }
+        // A text document picks the editor or the preview, as it did before.
+        assert_eq!(keyboard_target(false, true, false), KeyboardTarget::Editor);
+        assert_eq!(keyboard_target(false, false, true), KeyboardTarget::Editor);
+        assert_eq!(
+            keyboard_target(false, false, false),
+            KeyboardTarget::Preview
+        );
+    }
 
     #[test]
     fn a_click_takes_over_the_preview_slot_in_order() {
