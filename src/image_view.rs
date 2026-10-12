@@ -322,8 +322,7 @@ impl ImageView {
                                     let entity = menu_entity.clone();
                                     menu = menu.item(PopupMenuItem::new(label).on_click(
                                         move |_, _, cx| {
-                                            _ = entity
-                                                .update(cx, |this, cx| this.set_zoom(factor, cx));
+                                            entity.update(cx, |this, cx| this.set_zoom(factor, cx));
                                         },
                                     ));
                                 }
@@ -331,12 +330,12 @@ impl ImageView {
                                 let fit_page = menu_entity.clone();
                                 menu.item(PopupMenuItem::new("Fit width").on_click(
                                     move |_, _, cx| {
-                                        _ = fit_width.update(cx, |this, cx| this.fit_width(cx));
+                                        fit_width.update(cx, |this, cx| this.fit_width(cx));
                                     },
                                 ))
                                 .item(
                                     PopupMenuItem::new("Fit page").on_click(move |_, _, cx| {
-                                        _ = fit_page.update(cx, |this, cx| this.fit_page(cx));
+                                        fit_page.update(cx, |this, cx| this.fit_page(cx));
                                     }),
                                 )
                             }),
@@ -404,7 +403,7 @@ impl ImageView {
             .on_prepaint(move |bounds, _, cx| {
                 // Notifying mid-frame can be lost; update once it's done.
                 cx.defer(move |cx| {
-                    _ = entity.update(cx, |this, cx| {
+                    entity.update(cx, |this, cx| {
                         if this.viewport != bounds.size {
                             this.viewport = bounds.size;
                             cx.notify();
