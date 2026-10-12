@@ -18,8 +18,9 @@ use std::{
 
 use gpui_kit::{
     Anchor, App, Context, ElementId, FocusHandle, Focusable, Image, ImageFormat,
-    InteractiveElement as _, IntoElement, MouseDownEvent, ParentElement as _, PinchEvent, Pixels,
-    Render, ScrollDelta, ScrollStrategy, ScrollWheelEvent, Size, Styled as _, Window,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
+    PinchEvent, Pixels, Render, ScrollDelta, ScrollStrategy, ScrollWheelEvent, Size, Styled as _,
+    Window,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -371,7 +372,7 @@ impl PdfView {
     /// from a fit it doubles what the fit resolved to, and from a zoom the
     /// user set it goes back to fitting the page.
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if event.click_count != 2 {
+        if event.click_count != 2 || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
         if self.fit == FitMode::Custom {
@@ -780,7 +781,6 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.reset_zoom(cx)))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_pinch(cx.listener(|this, event: &PinchEvent, _, cx| this.on_pinch(event, cx)))
-            .on_mouse_down(cx.listener(Self::on_mouse_down))
             .child(self.render_toolbar(cx))
             // Double-click fits the page or zooms back out, the way the
             // diagram viewer does. On the content, not the whole view, so a
@@ -790,7 +790,7 @@ impl Render for PdfView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .on_mouse_down(cx.listener(Self::on_mouse_down))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .child(self.render_content(cx)),
             )
     }
