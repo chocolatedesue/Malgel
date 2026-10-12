@@ -9,8 +9,8 @@ use std::{path::Path, path::PathBuf, sync::Arc};
 
 use gpui_kit::{
     Anchor, App, Context, FocusHandle, Focusable, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, MouseDownEvent, ParentElement as _, PinchEvent, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, Size, Styled as _, Window,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, PinchEvent, Pixels, Render,
+    ScrollDelta, ScrollWheelEvent, Size, Styled as _, Window,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -226,7 +226,7 @@ impl ImageView {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if event.click_count == 2 {
+        if event.click_count == 2 && event.pressed_button == Some(MouseButton::Left) {
             self.on_double_click(cx);
         }
     }
@@ -437,7 +437,6 @@ impl Render for ImageView {
             .on_action(
                 cx.listener(|this, _: &crate::actions::ZoomReset, _, cx| this.reset_zoom(cx)),
             )
-            .on_mouse_down(cx.listener(Self::on_mouse_down))
             .child(self.render_toolbar(cx))
             // Double-click fits the page or zooms back out, the way the
             // diagram viewer does. On the content, not the whole view, so a
@@ -447,7 +446,7 @@ impl Render for ImageView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .on_mouse_down(cx.listener(Self::on_mouse_down))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .child(self.render_content(cx)),
             )
     }
