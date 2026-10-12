@@ -682,11 +682,13 @@ impl FileTree {
         cx: &mut Context<Self>,
     ) -> Vec<gpui_kit::AnyElement> {
         let theme = cx.theme();
-        let (hover, active_bg, muted) =
-            (theme.list_hover, theme.list_active, theme.muted_foreground);
-        // The file on screen is marked with the accent colour, so the row
-        // stands out from the hover and selection backgrounds.
-        let accent = theme.accent;
+        let (hover, active_bg, muted, fg, marker) = (
+            theme.list_hover,
+            theme.list_active,
+            theme.muted_foreground,
+            theme.foreground,
+            theme.primary,
+        );
         self.list_top = range.start;
         range
             .filter_map(|ix| {
@@ -729,9 +731,14 @@ impl FileTree {
                         .text_sm()
                         .cursor_pointer()
                         .when(is_active, |this| {
+                            // On the selection background the row keeps the
+                            // normal text colour: painting it in the accent
+                            // colour made the open file the least readable
+                            // row in the tree — invisible in the light theme,
+                            // dimmer than its neighbours in the dark one.
                             this.bg(active_bg)
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(accent)
+                                .text_color(fg)
                         })
                         .when(!is_active && is_selected, |this| this.bg(hover))
                         .when(!is_active && !is_selected, |this| {
@@ -764,9 +771,11 @@ impl FileTree {
                                 })
                                 // A dot in the same slot marks the file the
                                 // window is showing, the way the folder
-                                // chevron marks an open folder.
+                                // chevron marks an open folder. `primary` is
+                                // the theme's strongest colour, so it reads on
+                                // the selection background in either theme.
                                 .when(is_active && !entry.is_dir, |this| {
-                                    this.child(div().w(px(6.)).h(px(6.)).rounded(px(3.)).bg(accent))
+                                    this.child(div().w(px(6.)).h(px(6.)).rounded(px(3.)).bg(marker))
                                 }),
                         )
                         .child(Icon::new(icon).small().text_color(muted).flex_none())
