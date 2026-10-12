@@ -156,6 +156,11 @@ pub struct FileTree {
     hover_expand: Option<PathBuf>,
     /// The edge a drag is resting on, while the view scrolls along.
     drag_scroll: Option<DragEdge>,
+    /// The first row the list is showing, remembered from the last render so
+    /// the drag auto-scroll knows where it is. (`UniformListScrollHandle`
+    /// only exposes its own index under `cfg(test)`, which a release build
+    /// does not have.)
+    list_top: usize,
     scroll: UniformListScrollHandle,
     refresh_task: Option<Task<()>>,
 }
@@ -176,6 +181,7 @@ impl FileTree {
             drag_copy: Rc::new(Cell::new(false)),
             hover_expand: None,
             drag_scroll: None,
+            list_top: 0,
             scroll: UniformListScrollHandle::new(),
             refresh_task: None,
         };
@@ -461,12 +467,13 @@ impl FileTree {
         }
         let last = self.rows.len().saturating_sub(1);
         if last > 0 {
-            let top = self.scroll.logical_scroll_top_index().min(last);
+            let top = self.list_top.min(last);
             let next = match edge {
                 DragEdge::Up => top.saturating_sub(1),
                 DragEdge::Down => (top + 1).min(last),
             };
             if next != top {
+                self.list_top = next;
                 self.scroll
                     .scroll_to_item(next, gpui_kit::ScrollStrategy::Top);
             }
@@ -680,6 +687,7 @@ impl FileTree {
         // The file on screen is marked with the accent colour, so the row
         // stands out from the hover and selection backgrounds.
         let accent = theme.accent;
+        self.list_top = range.start;
         range
             .filter_map(|ix| {
                 let row = self.rows.get(ix)?;
