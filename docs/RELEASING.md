@@ -226,3 +226,60 @@ publisher rather than "Unknown publisher".
   at 2.35.
 
 Each script can be run locally on its platform; see the comment at its top.
+
+## Building from Linux
+
+Two of the three packages can be built on a Linux box; the macOS one cannot.
+
+| Package | From Linux | What it needs |
+| --- | --- | --- |
+| Linux tarball, AppImage | yes | `rustc`, the libraries the CI job installs (`libfontconfig-dev`, `libwayland-dev`, `libxkbcommon-x11-dev`, `libx11-xcb-dev`, `libssl-dev`, `libzstd-dev`, `libvulkan1`) and `linuxdeploy` for the AppImage |
+| Windows portable zip | yes, with one more step | `cargo xwin build --release --locked --target x86_64-pc-windows-msvc`, and Wine: see below |
+| Windows installer | no | `packaging/windows/malgel.iss` is an Inno Setup script and Inno Setup is a Windows program. An NSIS script would replace it: `makensis` runs on Linux |
+| macOS app, disk image | no | see below |
+
+macOS needs macOS in three independent places:
+
+- **Building.** The `gpui-pre-apple` build script compiles `src/shaders.metal`
+  with `xcrun metal` into `shaders.metallib` on every build (its
+  `runtime_shaders` feature moves that to run time instead). Linking also
+  needs the Apple SDK's frameworks, which `osxcross` or `cargo-zigbuild` can
+  only supply with a copy of the SDK.
+- **Bundling.** `packaging/macos/bundle.sh` uses `iconutil` and `plutil`.
+- **The disk image.** `hdiutil` writes the DMG, and `codesign` /
+  `xcrun notarytool` sign and notarize it.
+
+The Windows cross-build needs one thing that `cargo-xwin` does not provide:
+**`fxc.exe`**, the shader compiler. A release build of `gpui-pre-windows`
+compiles its HLSL with it (`build.rs`, path from `GPUI_FXC_PATH`, otherwise
+`where.exe fxc.exe`, otherwise the Windows SDK — and `panic!("Failed to find
+fxc.exe")` when none of those is there). `fxc.exe` is a Windows program, so
+on Linux it has to be run through Wine. Building with `debug-assertions` on
+skips fxc altogether, but then the shaders are read from the build machine at
+run time, which is what made early releases open only on the machine that
+built them.
+
+The Linux half, end to end:
+
+```sh
+# Linux, on any distribution with the libraries above
+sudo apt-get install -y libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
+    libx11-xcb-dev libssl-dev libzstd-dev libvulkan1
+cargo build --release --locked
+bash packaging/linux/package.sh target/release/malgel "$version" dist
+
+# Windows, from the same box: Wine wraps the SDK's fxc.exe for the build script
+apt-get install -y wine
+fxc=$(find ~/.cache/cargo-xwin -name fxc.exe | head -1)
+printf '#!/bin/sh\nexec wine %s "$@"\n' "$fxc" > /usr/local/bin/fxc.exe
+chmod +x /usr/local/bin/fxc.exe
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin
+GPUI_FXC_PATH=/usr/local/bin/fxc.exe \
+  cargo xwin build --release --locked --target x86_64-pc-windows-msvc
+```
+
+So the smallest set of machines that covers every package is: one Linux box
+for Linux and Windows, and one Mac for macOS. That is what the pipelines do
+today, with GitHub's runners standing in for the Mac and (in
+`release.yml`) for Windows too.
