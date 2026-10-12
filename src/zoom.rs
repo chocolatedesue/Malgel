@@ -35,16 +35,24 @@ pub fn percent(zoom: f32) -> String {
     format!("{:.0}%", zoom * 100.0)
 }
 
+// A step has to zoom in, and the limits have to be ordered, or a viewer would
+// clamp every step away. Checked when the crate is compiled rather than in a
+// test, since these are constants.
+const _: () = {
+    assert!(WHEEL_STEP > 1.0);
+    assert!(BUTTON_STEP > 1.0);
+    assert!(MIN < DEFAULT);
+    assert!(DEFAULT < MAX);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_step_and_a_preset_agree_with_the_limits() {
-        assert!(WHEEL_STEP > 1.0 && BUTTON_STEP > 1.0, "steps zoom in");
-        assert!(MIN < DEFAULT && DEFAULT < MAX);
-        // Every preset has to be reachable, or the menu would offer a factor
-        // the viewers clamp away.
+    fn every_preset_is_reachable() {
+        // A preset outside the limits would be clamped away by the viewers, so
+        // the menu would offer a factor the user cannot actually get.
         for &(factor, label) in PRESETS {
             assert!(
                 (MIN..=MAX).contains(&factor),
