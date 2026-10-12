@@ -501,3 +501,28 @@ jobs:
           if [[ "$TAG" == *-* ]]; then prerelease=true; fi
           gh release edit "$TAG" --draft=false --prerelease="$prerelease" \
             --title "Malgel ${{ needs.version.outputs.version }}" --notes "$notes"
+      - name: List the downloads in the release notes
+        # Until this step the page only carried the line the macOS job wrote when
+        # it opened the draft, which names no platform and offers no download.
+        run: |
+          body="$(gh release view "$TAG" --json body --jq .body)"
+          {
+            printf '%s\n\n' "$body"
+            printf '## Downloads\n\n'
+            printf '| Platform | File | SHA-256 |\n| --- | --- | --- |\n'
+            while read -r sum name; do
+              case "$name" in
+                *-macos-arm64.dmg) platform='macOS (Apple Silicon)' ;;
+                *-windows-x64-setup.exe) platform='Windows installer (unsigned)' ;;
+                *-windows-x64.zip) platform='Windows portable (unsigned)' ;;
+                *-linux-x86_64.tar.gz) platform='Linux tarball' ;;
+                *-x86_64.AppImage) platform='Linux AppImage' ;;
+                *) continue ;;
+              esac
+              printf '| %s | [%s](https://github.com/%s/releases/download/%s/%s) | `%s` |\n' \
+                "$platform" "$name" "$GH_REPO" "$TAG" "$name" "$sum"
+            done < dist/SHA256SUMS.txt
+            printf '\nChecksums for every file: [SHA256SUMS.txt](https://github.com/%s/releases/download/%s/SHA256SUMS.txt)\n' \
+              "$GH_REPO" "$TAG"
+          } > release-notes.md
+          gh release edit "$TAG" --notes-file release-notes.md
