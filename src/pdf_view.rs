@@ -580,7 +580,6 @@ impl PdfView {
                             .collect::<Vec<PdfPage>>();
                         let width: f32 = pages.iter().map(|page| page.width).sum::<f32>()
                             + PAGE_GAP * pages.len().saturating_sub(1) as f32;
-                        let height = pages.iter().map(|page| page.height).fold(0.0f32, f32::max);
                         let row_width = px((width * zoom).max(viewport_width));
                         let cards = pages
                             .iter()
