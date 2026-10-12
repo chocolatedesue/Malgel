@@ -869,7 +869,8 @@ mod tests {
         .collect();
 
         assert!(collapse_to_root(Some(root), &mut expanded));
-        assert_eq!(expanded, [root.to_path_buf()].into_iter().collect());
+        let expected: HashSet<PathBuf> = [root.to_path_buf()].into_iter().collect();
+        assert_eq!(expanded, expected);
         // A second press has nothing left to collapse.
         assert!(!collapse_to_root(Some(root), &mut expanded));
     }
