@@ -78,7 +78,18 @@ sys-locale = "0.3"
 # Word export. `image` converts pictures to PNG and `zip` finishes the
 # package; docx-rs already builds both.
 docx-rs = "0.4.22"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# Size probing for the image viewer: the decoders the viewer names in
+# `image_format` must be compiled in, or an image's natural size silently
+# falls back to the 4:3 default frame.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+    "tiff",
+    "ico",
+] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # Math rendering, all pure Rust: LaTeX is translated to Typst math, laid out
 # by the Typst compiler with its bundled math fonts, and drawn as SVG (or PNG
