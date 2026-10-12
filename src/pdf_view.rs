@@ -62,7 +62,7 @@ const PAGE_GAP: f32 = 20.;
 const PAGE_MARGIN: f32 = 24.;
 
 /// How the zoom factor is chosen.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FitMode {
     /// A user-set factor, from the zoom buttons.
     Custom,
