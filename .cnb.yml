@@ -88,7 +88,30 @@ main:
         DIST_BRANCH: dist/windows-x86_64
         AWS_LC_SYS_PREBUILT_NASM: "1"
         XWIN_ARCH: x86_64
+        # A release build of gpui-pre-windows compiles its HLSL with the
+        # Windows SDK's fxc.exe, which is a Windows program: Wine runs the
+        # copy cargo-xwin downloads. Without this the build script stops at
+        # "Failed to find fxc.exe" — and the alternative, debug-assertions on,
+        # ships an exe that reads the HLSL from the build machine and dies
+        # everywhere else. See Cargo.toml's release profile comment.
+        GPUI_FXC_PATH: /usr/local/bin/fxc.exe
       stages:
+        - name: fxc-shim
+          script: |
+            set -e
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends wine
+            fxc=$(find "${XWIN_CACHE_DIR:-}" /root /usr/local /opt -name fxc.exe 2>/dev/null | head -1)
+            if [ -z "$fxc" ]; then
+              echo "cargo-xwin's SDK cache holds no fxc.exe: either fetch the SDK tools" >&2
+              echo "(xwin --include-tools / the full Windows SDK) or mount an fxc.exe and" >&2
+              echo "point GPUI_FXC_PATH at it. A release build cannot skip the shader step." >&2
+              exit 1
+            fi
+            printf '#!/bin/sh\nexec wine %s "$@"\n' "$fxc" > /usr/local/bin/fxc.exe
+            chmod +x /usr/local/bin/fxc.exe
+            echo "fxc wrapper: $fxc"
+            wine "$fxc" 2>&1 | head -3 || true
         - name: rust-toolchain
           # The cargo-xwin image tracks an older rustc (1.89) than the
           # dependency tree requires (typst 0.15 needs >= 1.92).
