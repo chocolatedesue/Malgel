@@ -6,7 +6,7 @@
 
 use std::{
     cell::Cell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
@@ -14,9 +14,9 @@ use std::{
 
 use gpui_kit::{
     AppContext as _, Context, DragMoveEvent, EventEmitter, ExternalPaths, FontWeight,
-    InteractiveElement as _, IntoElement, Modifiers, MouseButton, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Task, UniformListScrollHandle,
-    Window,
+    InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
+    UniformListScrollHandle, Window,
     assets::IconName,
     component::{
         ActiveTheme as _, Icon, Sizable as _, WindowExt as _,
@@ -65,17 +65,17 @@ pub enum FileTreeEvent {
     },
 }
 
-/// A file or folder being dragged inside the tree, to move it the way
-/// VS Code moves entries within the explorer.
+/// Files or folders being dragged inside the tree, to move (or, with the
+/// invert key, copy) them the way VS Code moves explorer selections.
 #[derive(Clone)]
 pub struct TreeDrag {
-    pub path: PathBuf,
+    pub paths: Vec<PathBuf>,
 }
 
-/// Whether the drag-and-drop invert key is held while a tree entry drags:
-/// Ctrl on Windows and Linux, Option on macOS. Held, an in-app drag copies
-/// instead of moving, as in VS Code.
-fn invert_key_held(modifiers: &Modifiers) -> bool {
+/// Whether the drag-and-drop invert key is held while tree entries drag:
+/// Ctrl on Windows and Linux, Option on macOS. Held, an in-app drag
+/// copies instead of moving, as in VS Code.
+pub(crate) fn invert_key_held(modifiers: &Modifiers) -> bool {
     if cfg!(target_os = "macos") {
         modifiers.alt
     } else {
@@ -91,6 +91,28 @@ fn can_drop_into(source: &Path, target_dir: &Path) -> bool {
     source.parent() != Some(target_dir) && !(source.is_dir() && target_dir.starts_with(source))
 }
 
+/// Whether every entry of a selection may be dropped into `target_dir`.
+fn can_drop_all(sources: &[PathBuf], target_dir: &Path) -> bool {
+    !sources.is_empty()
+        && sources
+            .iter()
+            .all(|source| can_drop_into(source, target_dir))
+}
+
+/// Only the top-level entries of a selection: descendants come along
+/// with the folder that contains them.
+fn top_level(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| {
+            !paths
+                .iter()
+                .any(|other| other != *path && path.starts_with(other))
+        })
+        .cloned()
+        .collect()
+}
+
 pub struct FileTree {
     root: Option<PathBuf>,
     expanded: HashSet<PathBuf>,
@@ -98,6 +120,10 @@ pub struct FileTree {
     rows: Vec<Row>,
     /// The file the workspace is showing.
     active: Option<PathBuf>,
+    /// The rows picked with the multi-select keys, in row order.
+    selected: BTreeSet<PathBuf>,
+    /// Where Shift-extends starts from.
+    anchor: Option<PathBuf>,
     /// Whether dotfiles and the default-excluded entries are listed.
     show_hidden: bool,
     /// Shared with the drag-over styles, which run without access to the
@@ -117,6 +143,8 @@ impl FileTree {
             listings: HashMap::new(),
             rows: Vec::new(),
             active: None,
+            selected: BTreeSet::new(),
+            anchor: None,
             show_hidden: crate::themes::AppSettings::get(cx).show_hidden_entries,
             drag_copy: Rc::new(Cell::new(false)),
             scroll: UniformListScrollHandle::new(),
@@ -301,11 +329,16 @@ impl FileTree {
         }
     }
 
-    /// A tree entry dropped on empty space lands in the root folder
+    /// Tree entries dropped on empty space land in the root folder
     /// (copied with the invert key held, otherwise moved).
-    fn drop_entry_into_root(&mut self, source: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    fn drop_entry_into_root(
+        &mut self,
+        sources: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.root.clone() {
-            Some(root) => self.drop_tree_entry(source, &root, window, cx),
+            Some(root) => self.drop_tree_entry(sources, &root, window, cx),
             None => cx.emit(FileTreeEvent::Copied {
                 copied: 0,
                 failed: 1,
@@ -313,25 +346,29 @@ impl FileTree {
         }
     }
 
-    /// A tree entry dropped on a file row: VS Code rejects the drop; with
-    /// the invert key held it copies into the file's folder.
-    fn drop_onto_file(&mut self, source: &Path, file_dir: &Path, cx: &mut Context<Self>) {
-        if !self.drag_copy.get() || !can_drop_into(source, file_dir) {
+    /// Tree entries dropped on a file row: VS Code rejects the drop; with
+    /// the invert key held they copy into the file's folder.
+    fn drop_onto_file(&mut self, sources: Vec<PathBuf>, file_dir: &Path, cx: &mut Context<Self>) {
+        if !self.drag_copy.get() {
             return;
         }
-        match copy_entry(source, file_dir) {
-            Ok(()) => {
-                self.refresh(cx);
-                cx.emit(FileTreeEvent::Copied {
-                    copied: 1,
-                    failed: 0,
-                });
+        let sources = top_level(&sources);
+        let mut copied = 0usize;
+        let mut failed = 0usize;
+        for source in sources {
+            if can_drop_into(&source, file_dir) {
+                match copy_entry(&source, file_dir) {
+                    Ok(()) => copied += 1,
+                    Err(_) => failed += 1,
+                }
+            } else {
+                failed += 1;
             }
-            Err(_) => cx.emit(FileTreeEvent::Copied {
-                copied: 0,
-                failed: 1,
-            }),
         }
+        if copied > 0 {
+            self.refresh(cx);
+        }
+        cx.emit(FileTreeEvent::Copied { copied, failed });
     }
 
     /// Record whether the invert key is held right now, so the drag-over
@@ -345,81 +382,86 @@ impl FileTree {
         }
     }
 
-    /// Land a dragged tree entry in `target_dir`: a copy with the invert
-    /// key held, otherwise a move (confirmed first, as in VS Code).
+    /// Land dragged tree entries in `target_dir`: copies with the invert
+    /// key held, otherwise moves (confirmed first, as in VS Code).
     fn drop_tree_entry(
         &mut self,
-        source: &Path,
+        sources: Vec<PathBuf>,
         target_dir: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !can_drop_into(source, target_dir) {
+        let sources = top_level(&sources);
+        if !can_drop_all(&sources, target_dir) {
             // An invalid target stays rejected, exactly as VS Code.
             return;
         }
         if self.drag_copy.get() {
-            match copy_entry(source, target_dir) {
-                Ok(()) => {
-                    self.refresh(cx);
-                    cx.emit(FileTreeEvent::Copied {
-                        copied: 1,
-                        failed: 0,
-                    });
+            let mut copied = 0usize;
+            let mut failed = 0usize;
+            for source in &sources {
+                match copy_entry(source, target_dir) {
+                    Ok(()) => copied += 1,
+                    Err(_) => failed += 1,
                 }
-                Err(_) => cx.emit(FileTreeEvent::Copied {
-                    copied: 0,
-                    failed: 1,
-                }),
             }
+            if copied > 0 {
+                self.refresh(cx);
+            }
+            cx.emit(FileTreeEvent::Copied { copied, failed });
             return;
         }
         if crate::themes::AppSettings::get(cx).confirm_drag_and_drop {
-            self.confirm_move(source.to_path_buf(), target_dir.to_path_buf(), window, cx);
+            self.confirm_move(sources, target_dir.to_path_buf(), window, cx);
         } else {
-            self.apply_move(source, target_dir, cx);
+            self.apply_moves(sources, target_dir, cx);
         }
     }
 
-    /// Move a tree entry into `target_dir` (VS Code moves entries dragged
+    /// Move tree entries into `target_dir` (VS Code moves entries dragged
     /// within the explorer), then re-list and report the outcome.
-    fn apply_move(&mut self, source: &Path, target_dir: &Path, cx: &mut Context<Self>) {
-        let Some(name) = source.file_name() else {
-            return;
-        };
-        let dest = target_dir.join(name);
-        if source == dest || source.parent() == Some(target_dir) {
-            // Already there: nothing to do, as in VS Code.
-            return;
-        }
-        // A folder can't go inside itself or one of its descendants.
-        if source.is_dir() && target_dir.starts_with(source) {
-            cx.emit(FileTreeEvent::Copied {
-                copied: 0,
-                failed: 1,
-            });
-            return;
-        }
-        match move_path(source, &dest) {
-            Ok(()) => {
-                self.refresh(cx);
-                cx.emit(FileTreeEvent::Moved {
-                    from: source.to_path_buf(),
-                    to: dest,
-                });
+    fn apply_moves(&mut self, sources: Vec<PathBuf>, target_dir: &Path, cx: &mut Context<Self>) {
+        let mut moved = 0usize;
+        let mut failed = 0usize;
+        for source in sources {
+            let Some(name) = source.file_name() else {
+                failed += 1;
+                continue;
+            };
+            let dest = target_dir.join(name);
+            if source == dest || source.parent() == Some(target_dir) {
+                // Already there: nothing to do, as in VS Code.
+                continue;
             }
-            Err(_) => cx.emit(FileTreeEvent::Copied {
-                copied: 0,
-                failed: 1,
-            }),
+            // A folder can't go inside itself or one of its descendants.
+            if source.is_dir() && target_dir.starts_with(&source) {
+                failed += 1;
+                continue;
+            }
+            match move_path(&source, &dest) {
+                Ok(()) => {
+                    moved += 1;
+                    cx.emit(FileTreeEvent::Moved {
+                        from: source,
+                        to: dest,
+                    });
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        if moved > 0 {
+            self.refresh(cx);
+        }
+        if moved == 0 && failed > 0 {
+            cx.emit(FileTreeEvent::Copied { copied: 0, failed });
         }
     }
 
-    /// Ask before moving a dragged entry, with a "don't ask again" box
+    /// Ask before moving dragged entries, with a "don't ask again" box
     /// that mirrors VS Code's `explorer.confirmDragAndDrop`.
     fn confirm_move(
         &mut self,
-        source: PathBuf,
+        sources: Vec<PathBuf>,
         target_dir: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -427,16 +469,19 @@ impl FileTree {
         if window.has_active_dialog(cx) {
             return;
         }
-        let source_name = display_name(&source);
         let target_name = display_name(&target_dir);
+        let title = match sources.len() {
+            1 => format!("Move “{}” into “{target_name}”?", display_name(&sources[0])),
+            count => format!("Move {count} items into “{target_name}”?"),
+        };
         let dont_ask = Rc::new(Cell::new(false));
         let tree = cx.weak_entity();
         window.open_alert_dialog(cx, move |alert, _, _cx| {
             let (checkbox, remember) = (dont_ask.clone(), dont_ask.clone());
-            let (tree_move, source_move, target_move) =
-                (tree.clone(), source.clone(), target_dir.clone());
+            let (tree_move, target_move) = (tree.clone(), target_dir.clone());
+            let (title, sources_move) = (title.clone(), sources.clone());
             alert
-                .title(format!("Move “{source_name}” into “{target_name}”?"))
+                .title(title)
                 .description(
                     v_flex().gap_3().child(
                         Checkbox::new("dont-ask-move")
@@ -466,12 +511,54 @@ impl FileTree {
                                     });
                                 }
                                 _ = tree_move.update(cx, |tree, cx| {
-                                    tree.apply_move(&source_move, &target_move, cx)
+                                    tree.apply_moves(sources_move.clone(), &target_move, cx)
                                 });
                             },
                         )),
                 )
         });
+    }
+
+    /// Select one entry, clearing the rest. Shift extends from here.
+    fn select_only(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if self.selected.len() == 1 && self.selected.contains(path) {
+            return;
+        }
+        self.selected.clear();
+        self.selected.insert(path.to_path_buf());
+        self.anchor = Some(path.to_path_buf());
+        cx.notify();
+    }
+
+    /// Toggle one entry in the selection (the secondary key in VS Code).
+    fn toggle_selected(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if self.selected.contains(path) {
+            self.selected.remove(path);
+        } else {
+            self.selected.insert(path.to_path_buf());
+        }
+        self.anchor = Some(path.to_path_buf());
+        cx.notify();
+    }
+
+    /// Extend the selection from the anchor through `path` (Shift-click).
+    fn select_range(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(anchor) = self.anchor.clone() else {
+            self.select_only(path, cx);
+            return;
+        };
+        let from = self.rows.iter().position(|row| row.entry.path == anchor);
+        let to = self.rows.iter().position(|row| row.entry.path == path);
+        let (Some(from), Some(to)) = (from, to) else {
+            self.select_only(path, cx);
+            return;
+        };
+        let (lo, hi) = (from.min(to), from.max(to));
+        self.selected = self.rows[lo..=hi]
+            .iter()
+            .map(|row| row.entry.path.clone())
+            .collect();
+        cx.notify();
     }
 
     fn render_rows(
@@ -497,6 +584,20 @@ impl FileTree {
                 let path = entry.path.clone();
                 let drop_path = entry.path.clone();
                 let drag_name = entry.name.clone();
+                // Dragging a selected entry drags the whole selection, the
+                // way VS Code drags the explorer's selection.
+                let (drag_paths, drag_count) = if self.selected.contains(&path) {
+                    let count = self.selected.len();
+                    (self.selected.iter().cloned().collect::<Vec<_>>(), count)
+                } else {
+                    (vec![path.clone()], 1)
+                };
+                let ghost_label = if drag_count > 1 {
+                    format!("{drag_name} +{}", drag_count - 1)
+                } else {
+                    drag_name.clone()
+                };
+                let is_selected = self.selected.contains(&path);
                 Some(
                     h_flex()
                         .id(ix)
@@ -510,12 +611,15 @@ impl FileTree {
                         .when(is_active, |this| {
                             this.bg(active_bg).font_weight(FontWeight::MEDIUM)
                         })
-                        .when(!is_active, |this| this.hover(move |style| style.bg(hover)))
+                        .when(!is_active && is_selected, |this| this.bg(hover))
+                        .when(!is_active && !is_selected, |this| {
+                            this.hover(move |style| style.bg(hover))
+                        })
                         // Entries drag within the tree to move, the way
                         // VS Code's explorer does.
-                        .on_drag(TreeDrag { path: path.clone() }, move |_, _, _, cx| {
+                        .on_drag(TreeDrag { paths: drag_paths }, move |_, _, _, cx| {
                             cx.new(|_| DragGhost {
-                                label: drag_name.clone().into(),
+                                label: ghost_label.clone().into(),
                             })
                         })
                         .child(div().w(px(12.)).flex_none().when(entry.is_dir, |this| {
@@ -537,16 +641,26 @@ impl FileTree {
                         )
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                if entry.is_dir {
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                // Shift extends the selection, the
+                                // secondary key (Ctrl on Windows and Linux,
+                                // Command on macOS) toggles, a plain click
+                                // selects one and opens it, as in VS Code.
+                                if event.modifiers.shift {
+                                    this.select_range(&path, cx);
+                                } else if event.modifiers.secondary() {
+                                    this.toggle_selected(&path.clone(), cx);
+                                } else if entry.is_dir {
+                                    this.select_only(&path, cx);
                                     this.toggle(path.clone(), cx);
                                 } else {
+                                    this.select_only(&path, cx);
                                     cx.emit(FileTreeEvent::Open(path.clone()));
                                 }
                             }),
                         )
                         // A drop on a folder copies an OS drop into it, and
-                        // moves a tree entry into it (a copy with the
+                        // moves tree entries into it (copies with the
                         // invert key held). Illegal targets stay
                         // unhighlighted and reject the drop, as in VS Code.
                         .when(entry.is_dir, |this| {
@@ -560,11 +674,16 @@ impl FileTree {
                                 style.bg(cx.theme().drop_target)
                             })
                             .on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {
-                                this.drop_tree_entry(&drag.path, &folder_for_drop, window, cx)
+                                this.drop_tree_entry(
+                                    drag.paths.clone(),
+                                    &folder_for_drop,
+                                    window,
+                                    cx,
+                                )
                             }))
                             .drag_over::<TreeDrag>(
                                 move |style, drag: &TreeDrag, _, cx| {
-                                    if can_drop_into(&drag.path, &folder_for_style) {
+                                    if can_drop_all(&top_level(&drag.paths), &folder_for_style) {
                                         style.bg(cx.theme().drop_target)
                                     } else {
                                         style
@@ -577,20 +696,21 @@ impl FileTree {
                         // folder.
                         .when(!entry.is_dir, |this| {
                             let parent = entry.path.parent().map(Path::to_path_buf);
+                            let parent_for_drop = parent.clone();
                             let parent_for_style = parent.clone();
                             let intent = self.drag_copy.clone();
                             this.on_drop(cx.listener(move |this, drag: &TreeDrag, _, cx| {
-                                if let Some(parent) = parent.clone() {
-                                    this.drop_onto_file(&drag.path, &parent, cx);
+                                if let Some(parent) = parent_for_drop.clone() {
+                                    this.drop_onto_file(drag.paths.clone(), &parent, cx);
                                 }
                             }))
                             .drag_over::<TreeDrag>(
                                 move |style, drag: &TreeDrag, _, cx| {
                                     let copy = intent.get();
                                     if copy
-                                        && parent_for_style
-                                            .as_deref()
-                                            .is_some_and(|parent| can_drop_into(&drag.path, parent))
+                                        && parent_for_style.as_deref().is_some_and(|parent| {
+                                            can_drop_all(&top_level(&drag.paths), parent)
+                                        })
                                     {
                                         style.bg(cx.theme().drop_target)
                                     } else {
@@ -702,7 +822,7 @@ impl Render for FileTree {
             // Empty space accepts tree entries into the root folder; VS
             // Code shows no highlight for it, so none is drawn here.
             .on_drop(cx.listener(|this, drag: &TreeDrag, window, cx| {
-                this.drop_entry_into_root(&drag.path, window, cx)
+                this.drop_entry_into_root(drag.paths.clone(), window, cx)
             }))
             .on_drag_move::<TreeDrag>(cx.listener(
                 |this, event: &DragMoveEvent<TreeDrag>, _, cx| {
