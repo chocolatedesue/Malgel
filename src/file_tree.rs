@@ -14,7 +14,7 @@ use std::{
 
 use gpui_kit::{
     AppContext as _, Context, DragMoveEvent, EventEmitter, ExternalPaths, FontWeight,
-    InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+    InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
     UniformListScrollHandle, Window,
     assets::IconName,
@@ -53,17 +53,13 @@ struct Row {
 }
 
 pub enum FileTreeEvent {
-    Open(PathBuf),
+    /// A file was clicked: `preview` asks for the slot a plain click reuses,
+    /// rather than a tab of its own.
+    Open { path: PathBuf, preview: bool },
     /// Files dropped onto the tree were copied into a folder.
-    Copied {
-        copied: usize,
-        failed: usize,
-    },
+    Copied { copied: usize, failed: usize },
     /// An entry (and everything below it) was moved within the tree.
-    Moved {
-        from: PathBuf,
-        to: PathBuf,
-    },
+    Moved { from: PathBuf, to: PathBuf },
 }
 
 /// Files or folders being dragged inside the tree, to move (or, with the
@@ -605,6 +601,8 @@ impl FileTree {
                     drag_name.clone()
                 };
                 let is_selected = self.selected.contains(&path);
+                let click_path = entry.path.clone();
+                let click_is_dir = entry.is_dir;
                 Some(
                     h_flex()
                         .id(ix)
@@ -665,20 +663,40 @@ impl FileTree {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                // Shift extends the selection, the
+                                // Shift extends the selection and the
                                 // secondary key (Ctrl on Windows and Linux,
-                                // Command on macOS) toggles, a plain click
-                                // selects one and opens it, as in VS Code.
+                                // Command on macOS) toggles one entry; a
+                                // plain click selects one. Opening waits for
+                                // the release, so a press that turns into a
+                                // drag never opens the file it moves.
                                 if event.modifiers.shift {
                                     this.select_range(&path, cx);
                                 } else if event.modifiers.secondary() {
                                     this.toggle_selected(&path.clone(), cx);
-                                } else if entry.is_dir {
-                                    this.select_only(&path, cx);
-                                    this.toggle(path.clone(), cx);
                                 } else {
                                     this.select_only(&path, cx);
-                                    cx.emit(FileTreeEvent::Open(path.clone()));
+                                }
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                                if cx.has_active_drag()
+                                    || event.modifiers.shift
+                                    || event.modifiers.secondary()
+                                {
+                                    return;
+                                }
+                                if click_is_dir {
+                                    this.toggle(click_path.clone(), cx);
+                                } else {
+                                    // One click shows the file in the slot
+                                    // the next click replaces; a double
+                                    // click keeps it, as in VS Code.
+                                    cx.emit(FileTreeEvent::Open {
+                                        path: click_path.clone(),
+                                        preview: event.click_count < 2,
+                                    });
                                 }
                             }),
                         )
