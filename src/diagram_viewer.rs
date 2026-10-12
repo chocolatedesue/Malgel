@@ -33,6 +33,7 @@ use crate::{
     actions::{CloseWindow, ZoomIn, ZoomOut, ZoomReset},
     analysis::content_hash,
     diagram::{self, DiagramTheme},
+    zoom,
 };
 
 actions!(
@@ -52,11 +53,6 @@ actions!(
 const KEY_CONTEXT: &str = "DiagramViewer";
 /// Space kept around the diagram when it's fitted to the window.
 const MARGIN: f32 = 32.;
-/// Each zoom step, by button or key.
-const ZOOM_STEP: f32 = 1.25;
-/// Each notch of a mouse wheel.
-const WHEEL_STEP: f32 = 1.2;
-const MAX_ZOOM: f32 = 16.;
 /// A fitted diagram is enlarged at most this much; tiny ones get no bigger.
 const MAX_FIT: f32 = 6.;
 /// How far the arrow keys move the diagram.
@@ -292,7 +288,7 @@ impl DiagramViewer {
         if self.drawn().is_none() {
             return;
         }
-        let new_zoom = (self.zoom * factor).clamp(self.min_zoom(), MAX_ZOOM);
+        let new_zoom = (self.zoom * factor).clamp(self.min_zoom(), zoom::MAX);
         let anchor = anchor
             .map(|anchor| anchor - self.viewport.origin)
             .unwrap_or_else(|| {
@@ -400,7 +396,7 @@ impl DiagramViewer {
             // A mouse wheel zooms, as in image viewers, a step per notch
             // (which systems count as one to three lines).
             ScrollDelta::Lines(lines) => self.zoom_by(
-                WHEEL_STEP.powf(lines.y.clamp(-1., 1.)),
+                zoom::WHEEL_STEP.powf(lines.y.clamp(-1., 1.)),
                 Some(event.position),
                 cx,
             ),
@@ -476,7 +472,11 @@ impl DiagramViewer {
                     .icon(Icon::new(IconName::ZoomOut))
                     .tooltip("Zoom out")
                     .disabled(!ready)
-                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1. / ZOOM_STEP, None, cx))),
+                    .on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.zoom_by(1. / zoom::BUTTON_STEP, None, cx)
+                        }),
+                    ),
             )
             .child(
                 Button::new("actual-size")
@@ -496,7 +496,9 @@ impl DiagramViewer {
                     .icon(Icon::new(IconName::ZoomIn))
                     .tooltip("Zoom in")
                     .disabled(!ready)
-                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(ZOOM_STEP, None, cx))),
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.zoom_by(zoom::BUTTON_STEP, None, cx)),
+                    ),
             )
             .child(
                 Button::new("fit")
@@ -616,18 +618,18 @@ impl Render for DiagramViewer {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .on_action(cx.listener(|this, _: &DiagramZoomIn, _, cx| {
+                this.zoom_by(zoom::BUTTON_STEP, None, cx)
+            }))
             .on_action(
-                cx.listener(|this, _: &DiagramZoomIn, _, cx| this.zoom_by(ZOOM_STEP, None, cx)),
+                cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(zoom::BUTTON_STEP, None, cx)),
             )
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(ZOOM_STEP, None, cx)))
-            .on_action(
-                cx.listener(|this, _: &DiagramZoomOut, _, cx| {
-                    this.zoom_by(1. / ZOOM_STEP, None, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(1. / ZOOM_STEP, None, cx)),
-            )
+            .on_action(cx.listener(|this, _: &DiagramZoomOut, _, cx| {
+                this.zoom_by(1. / zoom::BUTTON_STEP, None, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.zoom_by(1. / zoom::BUTTON_STEP, None, cx)
+            }))
             .on_action(cx.listener(|this, _: &FitDiagram, _, cx| this.fit(cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.fit(cx)))
             .on_action(cx.listener(|this, _: &ActualSize, _, cx| this.set_zoom(1., cx)))

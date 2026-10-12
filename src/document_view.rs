@@ -35,7 +35,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    actions::{AddToDictionary, CopyRichText, ReplaceMisspelling},
+    actions::{AddToDictionary, CopyRichText, ReplaceMisspelling, ZoomIn, ZoomOut},
     analysis::{Analysis, content_hash},
     document::{LineEnding, display_name},
     file_tree::TreeDrag,
@@ -1191,6 +1191,33 @@ impl DocumentView {
         }
     }
 
+    /// Command or Control plus the wheel zooms, the way it does in the image
+    /// and PDF viewers; on its own the wheel keeps scrolling. Both panes come
+    /// through here, so one gesture behaves the same in the editor and in the
+    /// preview. Returns whether the event was consumed.
+    fn zoom_on_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !event.modifiers.secondary() {
+            return false;
+        }
+        let step = f32::from(event.delta.pixel_delta(window.line_height()).y);
+        if step != 0. {
+            let action: Box<dyn gpui_kit::Action> = if step > 0. {
+                Box::new(ZoomIn)
+            } else {
+                Box::new(ZoomOut)
+            };
+            window.dispatch_action(action, cx);
+        }
+        // Otherwise the pane underneath scrolls as the zoom resizes it.
+        cx.stop_propagation();
+        true
+    }
+
     fn syncs_scrolling(&self, cx: &App) -> bool {
         let settings = AppSettings::get(cx);
         settings.scroll_sync && settings.layout == Layout::Split && !settings.focus_mode
@@ -1404,6 +1431,9 @@ impl DocumentView {
                 }
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                if this.zoom_on_wheel(event, window, cx) {
+                    return;
+                }
                 this.set_scroll_driver(ScrollDriver::Editor);
                 this.editor.update(cx, |editor, cx| {
                     let line_height = editor.line_height().unwrap_or(window.line_height());
@@ -1467,6 +1497,9 @@ impl DocumentView {
                 this.set_scroll_driver(ScrollDriver::Preview)
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                if this.zoom_on_wheel(event, window, cx) {
+                    return;
+                }
                 this.set_scroll_driver(ScrollDriver::Preview);
                 let list = this.preview.read(cx).list_state().clone();
                 if list.viewport_bounds().contains(&event.position) {
