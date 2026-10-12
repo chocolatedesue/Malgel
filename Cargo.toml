@@ -9,9 +9,8 @@ homepage = "https://www.malgel.com"
 publish = false
 
 [dependencies]
-# Force rust-embed to embed at compile time even with debug-assertions on
-# (the windows shader fix turns debug_assertions on in release, which would
-# otherwise make gpui-kit assets load from the build machine at runtime).
+# Embed gpui-kit's assets in the binary even in a debug build; without this
+# feature a debug binary loads them from the build machine at runtime.
 rust-embed = { version = "8.12.0", features = ["debug-embed"] }
 
 log = "0.4"
