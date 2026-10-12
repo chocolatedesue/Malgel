@@ -226,7 +226,8 @@ impl ImageView {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if event.click_count == 2 && event.pressed_button == Some(MouseButton::Left) {
+        // Only the left button gets here; the wiring asks for it.
+        if event.click_count == 2 {
             self.on_double_click(cx);
         }
     }
