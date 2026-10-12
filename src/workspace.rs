@@ -1918,11 +1918,31 @@ impl Workspace {
             window.push_notification(Notification::info("Open a folder to search its files."), cx);
             return;
         };
-        let files = quick_open::files_under(
-            &root,
-            AppSettings::get(cx).show_hidden_entries,
-            quick_open::MAX_FILES,
-        );
+        // The listing is read off the UI thread: walking a large folder used
+        // to hold the window while it ran.
+        let show_hidden = AppSettings::get(cx).show_hidden_entries;
+        let opened = self.file_tree.read(cx).expanded_folders();
+        let walk_root = root.clone();
+        let listing = cx.background_executor().spawn(async move {
+            quick_open::files_under(&walk_root, show_hidden, &opened, quick_open::MAX_FILES)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let files = listing.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                this.open_quick_open(root, files, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Open the Quick Open palette over the files just listed.
+    fn open_quick_open(
+        &mut self,
+        root: PathBuf,
+        files: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if files.is_empty() {
             window.push_notification(Notification::info("No files in this folder yet."), cx);
             return;

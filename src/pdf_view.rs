@@ -190,6 +190,8 @@ pub struct PdfView {
     zoom: f32,
     /// The user's factor, used when `fit` is [`FitMode::Custom`].
     custom_zoom: f32,
+    /// Whether two pages share a row, the way a bound document reads.
+    spread: bool,
     /// The page currently at the top of the viewport.
     current_page: usize,
     scroll: VirtualListScrollHandle,
@@ -212,10 +214,38 @@ impl PdfView {
             fit: FitMode::Custom,
             zoom: DEFAULT_ZOOM,
             custom_zoom: DEFAULT_ZOOM,
+            spread: false,
             current_page: 0,
             scroll: VirtualListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         }
+    }
+
+    /// Whether two pages are shown side by side.
+    pub fn spread(&self) -> bool {
+        self.spread
+    }
+
+    /// Show two pages side by side, or one at a time.
+    pub fn set_spread(&mut self, spread: bool, cx: &mut Context<Self>) {
+        if self.spread != spread {
+            self.spread = spread;
+            cx.notify();
+        }
+    }
+
+    /// How many pages share a row.
+    fn per_row(&self) -> usize {
+        if self.spread { 2 } else { 1 }
+    }
+
+    /// The page indexes each row shows, in order.
+    fn rows(&self) -> Vec<Vec<usize>> {
+        let per_row = self.per_row();
+        (0..self.page_count())
+            .step_by(per_row)
+            .map(|start| (start..(start + per_row).min(self.page_count())).collect())
+            .collect()
     }
 
     /// The path of the open document, if opened from disk.
@@ -293,7 +323,9 @@ impl PdfView {
         }
         let index = index.min(count - 1);
         self.current_page = index;
-        self.scroll.scroll_to_item(index, ScrollStrategy::Top);
+        // Rows hold one or two pages; scroll to the row showing this one.
+        self.scroll
+            .scroll_to_item(index / self.per_row(), ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -307,16 +339,32 @@ impl PdfView {
         }
         let avail_width = (viewport.width.as_f32() - 2. * PAGE_MARGIN - 12.).max(1.);
         let avail_height = (viewport.height.as_f32() - 2. * PAGE_MARGIN).max(1.);
+        // A spread row is wider than a single page by the page next to it and
+        // the gap between them, so fitting has to allow for both.
+        let row_width = |row: &[usize]| {
+            row.iter().map(|&ix| doc.pages[ix].width).sum::<f32>()
+                + PAGE_GAP * row.len().saturating_sub(1) as f32
+        };
         match self.fit {
             FitMode::Custom => self.custom_zoom.clamp(MIN_ZOOM, MAX_ZOOM),
             FitMode::Width => {
-                let widest = doc.pages.iter().fold(1.0f32, |w, p| w.max(p.width));
+                let widest = self
+                    .rows()
+                    .iter()
+                    .map(|row| row_width(row))
+                    .fold(1.0f32, f32::max);
                 (avail_width / widest).clamp(MIN_ZOOM, MAX_ZOOM)
             }
             FitMode::Page => {
-                let page = &doc.pages[0];
-                let scale = (avail_width / page.width).min(avail_height / page.height);
-                scale.clamp(MIN_ZOOM, MAX_ZOOM)
+                let row = self.rows().first().cloned().unwrap_or_default();
+                let width = row_width(&row).max(1.);
+                let height = row
+                    .iter()
+                    .map(|&ix| doc.pages[ix].height)
+                    .fold(1.0f32, f32::max);
+                (avail_width / width)
+                    .min(avail_height / height)
+                    .clamp(MIN_ZOOM, MAX_ZOOM)
             }
         }
     }
@@ -384,6 +432,19 @@ impl PdfView {
                             .toggled(self.fit == FitMode::Page)
                             .disabled(total == 0)
                             .on_click(cx.listener(|this, _, _, cx| this.fit_page(cx))),
+                    )
+                    .child(
+                        Button::new("pdf-spread")
+                            .ghost()
+                            .small()
+                            .compact()
+                            .label("Two pages")
+                            .tooltip("Show two pages side by side")
+                            .toggled(self.spread)
+                            .disabled(total == 0)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.set_spread(!this.spread, cx)),
+                            ),
                     )
                     .child(
                         Button::new("pdf-zoom-reset")
@@ -467,21 +528,33 @@ impl PdfView {
         let zoom = self.zoom;
         let total = doc.pages.len();
         let viewport_width = self.scroll.bounds().size.width.as_f32();
+        // One row per page, or per pair when the pages are spread out.
+        let rows: Rc<Vec<Vec<usize>>> = Rc::new(self.rows());
+        let row_width = |row: &[usize]| {
+            row.iter().map(|&ix| doc.pages[ix].width).sum::<f32>()
+                + PAGE_GAP * row.len().saturating_sub(1) as f32
+        };
+        let row_height = |row: &[usize]| {
+            row.iter()
+                .map(|&ix| doc.pages[ix].height)
+                .fold(0.0f32, f32::max)
+        };
         let sizes: Rc<Vec<Size<Pixels>>> = Rc::new(
-            doc.pages
-                .iter()
-                .map(|page| {
-                    gpui_kit::size(px(page.width * zoom), px(page.height * zoom + PAGE_GAP))
+            rows.iter()
+                .map(|row| {
+                    gpui_kit::size(
+                        px(row_width(row) * zoom),
+                        px(row_height(row) * zoom + PAGE_GAP),
+                    )
                 })
                 .collect(),
         );
-        // Measure the widest page, so the content can be wider than the
+        // Measure the widest row, so the content can be wider than the
         // viewport and zoomed-in pages stay horizontally reachable.
-        let measure_ix = doc
-            .pages
+        let measure_ix = rows
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.width.total_cmp(&b.1.width))
+            .max_by(|a, b| row_width(a.1).total_cmp(&row_width(b.1)))
             .map(|(ix, _)| ix)
             .unwrap_or(0);
 
@@ -493,55 +566,78 @@ impl PdfView {
             "pdf-pages",
             sizes,
             move |this, range: Range<usize>, _window, _cx| {
-                if let Some(doc) = &this.doc {
-                    this.current_page = range.start.min(doc.pages.len().saturating_sub(1));
+                if let Some(first) = rows.get(range.start).and_then(|row| row.first())
+                    && let Some(doc) = &this.doc
+                {
+                    this.current_page = (*first).min(doc.pages.len().saturating_sub(1));
                 }
                 range
-                    .filter_map(|ix| {
-                        let page = this.doc.as_ref()?.pages.get(ix)?.clone();
-                        let width = px(page.width * zoom);
-                        let height = px(page.height * zoom);
-                        let row_width = px((page.width * zoom).max(viewport_width));
-                        let image = this.doc.as_mut()?.image(ix);
-                        let card = match image {
-                            Some(image) => div()
-                                .w(width)
-                                .h(height)
-                                .bg(rgb(0xffffff))
-                                .border_1()
-                                .border_color(border)
-                                .shadow_md()
-                                .rounded_sm()
-                                .overflow_hidden()
-                                .child(img(image).w(width).h(height))
-                                .into_any_element(),
-                            None => div()
-                                .w(width)
-                                .h(height)
-                                .bg(rgb(0xffffff))
-                                .border_1()
-                                .border_color(border)
-                                .rounded_sm()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(format!("Page {}", page.page_number))
-                                .into_any_element(),
-                        };
+                    .filter_map(|row_ix| {
+                        let row = rows.get(row_ix)?.clone();
+                        let pages = row
+                            .iter()
+                            .filter_map(|&ix| this.doc.as_ref()?.pages.get(ix).cloned())
+                            .collect::<Vec<PdfPage>>();
+                        let width: f32 = pages.iter().map(|page| page.width).sum::<f32>()
+                            + PAGE_GAP * pages.len().saturating_sub(1) as f32;
+                        let height = pages.iter().map(|page| page.height).fold(0.0f32, f32::max);
+                        let row_width = px((width * zoom).max(viewport_width));
+                        let cards = pages
+                            .iter()
+                            .zip(&row)
+                            .map(|(page, &page_ix)| {
+                                let width = px(page.width * zoom);
+                                let height = px(page.height * zoom);
+                                match this.doc.as_mut().and_then(|doc| doc.image(page_ix)) {
+                                    Some(image) => div()
+                                        .w(width)
+                                        .h(height)
+                                        .flex_none()
+                                        .bg(rgb(0xffffff))
+                                        .border_1()
+                                        .border_color(border)
+                                        .shadow_md()
+                                        .rounded_sm()
+                                        .overflow_hidden()
+                                        .child(img(image).w(width).h(height))
+                                        .into_any_element(),
+                                    None => div()
+                                        .w(width)
+                                        .h(height)
+                                        .flex_none()
+                                        .bg(rgb(0xffffff))
+                                        .border_1()
+                                        .border_color(border)
+                                        .rounded_sm()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(format!("Page {}", page.page_number))
+                                        .into_any_element(),
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let first = pages.first()?.page_number;
                         Some(
                             v_flex()
-                                .id(ElementId::NamedInteger("pdf-page".into(), ix as u64))
+                                .id(ElementId::NamedInteger("pdf-page".into(), row_ix as u64))
                                 .w(row_width)
                                 .items_center()
                                 .pb(px(PAGE_GAP))
-                                .child(card)
+                                .child(
+                                    cards
+                                        .into_iter()
+                                        .fold(h_flex().gap_2().items_start(), |row, card| {
+                                            row.child(card)
+                                        }),
+                                )
                                 .child(
                                     div()
                                         .text_xs()
                                         .text_color(muted)
-                                        .child(format!("{} / {}", page.page_number, total)),
+                                        .child(format!("{first} / {total}")),
                                 )
                                 .into_any_element(),
                         )

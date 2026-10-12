@@ -183,16 +183,32 @@ impl FileTree {
         if let Some(root) = self.root.clone() {
             self.expanded.insert(root);
         }
+        // A file opened before its folder was would otherwise lose its way
+        // back into the tree.
+        self.reveal_active();
         self.refresh(cx);
         cx.notify();
     }
 
     /// Highlight `path`, expanding the folders above it.
     pub fn set_active(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
-        if self.active == path {
-            return;
-        }
         self.active = path;
+        if self.reveal_active() {
+            self.refresh(cx);
+        } else {
+            self.scroll_to_active();
+        }
+        cx.notify();
+    }
+
+    /// The folders the sidebar has open, for Quick Open's walk.
+    pub fn expanded_folders(&self) -> Vec<PathBuf> {
+        self.expanded.iter().cloned().collect()
+    }
+
+    /// Open every folder above the active file, so it is on screen. Returns
+    /// whether that expanded anything, and the tree therefore needs relisting.
+    fn reveal_active(&mut self) -> bool {
         let mut revealed = false;
         if let (Some(root), Some(active)) = (&self.root, &self.active) {
             let mut dir = active.parent();
@@ -204,12 +220,7 @@ impl FileTree {
                 dir = folder.parent();
             }
         }
-        if revealed {
-            self.refresh(cx);
-        } else {
-            self.scroll_to_active();
-        }
-        cx.notify();
+        revealed
     }
 
     /// Re-list the root and every expanded folder in the background.
@@ -571,6 +582,9 @@ impl FileTree {
         let theme = cx.theme();
         let (hover, active_bg, muted) =
             (theme.list_hover, theme.list_active, theme.muted_foreground);
+        // The file on screen is marked with the accent colour, so the row
+        // stands out from the hover and selection backgrounds.
+        let accent = theme.accent;
         range
             .filter_map(|ix| {
                 let row = self.rows.get(ix)?;
@@ -610,7 +624,9 @@ impl FileTree {
                         .text_sm()
                         .cursor_pointer()
                         .when(is_active, |this| {
-                            this.bg(active_bg).font_weight(FontWeight::MEDIUM)
+                            this.bg(active_bg)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(accent)
                         })
                         .when(!is_active && is_selected, |this| this.bg(hover))
                         .when(!is_active && !is_selected, |this| {
@@ -623,17 +639,31 @@ impl FileTree {
                                 label: ghost_label.clone().into(),
                             })
                         })
-                        .child(div().w(px(12.)).flex_none().when(entry.is_dir, |this| {
-                            this.child(
-                                Icon::new(if expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
+                        .child(
+                            div()
+                                .w(px(12.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(entry.is_dir, |this| {
+                                    this.child(
+                                        Icon::new(if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .xsmall()
+                                        .text_color(muted),
+                                    )
                                 })
-                                .xsmall()
-                                .text_color(muted),
-                            )
-                        }))
+                                // A dot in the same slot marks the file the
+                                // window is showing, the way the folder
+                                // chevron marks an open folder.
+                                .when(is_active && !entry.is_dir, |this| {
+                                    this.child(div().w(px(6.)).h(px(6.)).rounded(px(3.)).bg(accent))
+                                }),
+                        )
                         .child(Icon::new(icon).small().text_color(muted).flex_none())
                         .child(
                             div()

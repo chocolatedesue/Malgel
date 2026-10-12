@@ -91,6 +91,10 @@ image = { version = "0.25", default-features = false, features = [
     "ico",
 ] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# Quick Open walks the open folder with this: it reads .gitignore, .ignore and
+# the global git ignore, so the palette does not offer build output or a
+# vendored tree. Typst already pulls it in, so the lockfile does not move.
+ignore = "0.4.33"
 # Math rendering, all pure Rust: LaTeX is translated to Typst math, laid out
 # by the Typst compiler with its bundled math fonts, and drawn as SVG (or PNG
 # for Word). PDF export compiles whole documents with the same compiler.
