@@ -199,7 +199,6 @@ fn open_window(
     app_menu_bar: gpui_kit::Entity<gpui_kit::component::menu::AppMenuBar>,
     cx: &mut App,
 ) {
-    eprintln!("TRACE: open_window enter");
     let window_bounds = workspace::restored_bounds(cx).unwrap_or_else(|| {
         let mut window_size = size(px(1280.), px(840.));
         if let Some(display) = cx.primary_display() {
@@ -221,9 +220,7 @@ fn open_window(
         ..TitleBar::window_options()
     };
 
-    eprintln!("TRACE: calling gpui open_window");
     let result = gpui_kit::open_window(options, cx, move |window, cx| {
-        eprintln!("TRACE: window build callback enter");
         themes::apply(Some(window), cx);
         let workspace = cx.new(|cx| Workspace::new(paths, app_menu_bar, window, cx));
         cx.set_global(MainWindow {
@@ -232,7 +229,6 @@ fn open_window(
         });
         workspace
     });
-    eprintln!("TRACE: gpui open_window returned");
     if let Err(err) = result {
         eprintln!("malgel: could not open a window: {err:#}");
         cx.quit();
