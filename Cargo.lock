@@ -4959,6 +4959,7 @@ dependencies = [
  "gpui-pre-reqwest-client",
  "hayro",
  "hayro-svg",
+ "ignore",
  "image",
  "log",
  "markdown",
