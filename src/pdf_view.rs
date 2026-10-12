@@ -51,6 +51,10 @@ pub const MAX_ZOOM: f32 = 8.0;
 pub const ZOOM_STEP: f32 = 1.25;
 /// Multiplier for one notch of the mouse wheel.
 const WHEEL_STEP: f32 = 1.2;
+/// How a document is zoomed when it is opened: the whole first page, the way
+/// a PDF reader shows a file it has not seen before. The image viewer opens
+/// the same way.
+const DEFAULT_FIT: FitMode = FitMode::Page;
 
 /// Gap between pages, in logical pixels.
 const PAGE_GAP: f32 = 20.;
@@ -257,7 +261,7 @@ impl PdfView {
             path,
             title,
             doc: Some(doc),
-            fit: FitMode::Custom,
+            fit: DEFAULT_FIT,
             zoom: DEFAULT_ZOOM,
             custom_zoom: DEFAULT_ZOOM,
             spread: false,
@@ -807,6 +811,19 @@ mod tests {
         // 1400 - 60 = 1340 wide, 700 - 48 = 652 high: the height binds.
         let zoom = fit_zoom(FitMode::Page, 1.0, &[vec![page, page]], (1400.0, 700.0));
         assert!((zoom - 0.815).abs() < 0.001, "got {zoom}");
+    }
+
+    #[test]
+    fn a_document_opens_showing_the_whole_first_page() {
+        // A4 in points, in a window that is narrower and shorter than the
+        // page at 100%: opening must scale it down, not show its corner.
+        let page = (595.0, 842.0);
+        let viewport = (1173.0, 789.0);
+        assert_eq!(DEFAULT_FIT, FitMode::Page);
+        let zoom = fit_zoom(DEFAULT_FIT, DEFAULT_ZOOM, &[vec![page]], viewport);
+        assert!(page.0 * zoom <= viewport.0, "width overflows at {zoom}");
+        assert!(page.1 * zoom <= viewport.1, "height overflows at {zoom}");
+        assert!(zoom < 1.0, "a page taller than the window must shrink");
     }
 
     #[test]
