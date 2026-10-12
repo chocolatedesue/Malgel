@@ -142,10 +142,16 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewFile, None),
         KeyBinding::new("secondary-o", Open, None),
-        // The two-key chord VS Code uses. `secondary-k` is a prefix of it,
-        // so pressing it alone now waits for the chord to complete (or time
-        // out) before inserting a link.
+        // VS Code's chord. Not on macOS: a menu item there carries exactly one
+        // key equivalent, `secondary-k` is already the Format ▸ Link item's,
+        // and Open folder is itself a menu item — so the first key of the
+        // chord goes to Link and the chord can never complete.
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("secondary-k secondary-o", OpenFolder, workspace),
+        // One key instead, on a combination nothing else uses, so it shows up
+        // in the File menu the way a Mac shortcut should.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("secondary-ctrl-o", OpenFolder, workspace),
         KeyBinding::new("secondary-r", OpenRecent(0), workspace),
         KeyBinding::new("secondary-s", Save, workspace),
         KeyBinding::new("secondary-shift-s", SaveAs, workspace),
@@ -207,14 +213,16 @@ mod tests {
     /// `KeyBinding::new` panics on anything it cannot parse, so this also
     /// guards the spelling of every shortcut in `bind_keys`.
     #[test]
-    fn the_open_folder_shortcut_is_the_two_key_chord() {
+    fn open_folder_is_a_chord_off_macos_and_one_key_on_it() {
         let chord = KeyBinding::new("secondary-k secondary-o", OpenFolder, None);
         assert_eq!(
             chord.keystrokes().len(),
             2,
             "should be a two-keystroke chord"
         );
-        // The plain shortcuts it has to coexist with stay single keystrokes.
+        let mac = KeyBinding::new("secondary-ctrl-o", OpenFolder, None);
+        assert_eq!(mac.keystrokes().len(), 1, "macOS gets a single key");
+        // The plain shortcuts both forms have to coexist with stay single.
         let link = KeyBinding::new("secondary-k", InsertLink, None);
         assert_eq!(link.keystrokes().len(), 1);
         let open = KeyBinding::new("secondary-o", Open, None);
