@@ -50,7 +50,12 @@ pub fn files_under(
             if depth < MAX_DEPTH {
                 return true;
             }
-            depth < MAX_OPENED_DEPTH && opened.iter().any(|folder| entry.path().starts_with(folder))
+            // Below the cap, keep the folders the user opened, the folders
+            // on the way down to one, and whatever is inside them.
+            depth < MAX_OPENED_DEPTH
+                && opened.iter().any(|folder| {
+                    entry.path().starts_with(folder) || folder.starts_with(entry.path())
+                })
         })
         .build();
 
