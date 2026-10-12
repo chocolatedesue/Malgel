@@ -209,18 +209,10 @@ impl FileTree {
     /// Open every folder above the active file, so it is on screen. Returns
     /// whether that expanded anything, and the tree therefore needs relisting.
     fn reveal_active(&mut self) -> bool {
-        let mut revealed = false;
-        if let (Some(root), Some(active)) = (&self.root, &self.active) {
-            let mut dir = active.parent();
-            while let Some(folder) = dir {
-                if !folder.starts_with(root) {
-                    break;
-                }
-                revealed |= self.expanded.insert(folder.to_path_buf());
-                dir = folder.parent();
-            }
+        match (&self.root, &self.active) {
+            (Some(root), Some(active)) => expand_to_reveal(root, active, &mut self.expanded),
+            _ => false,
         }
-        revealed
     }
 
     /// Re-list the root and every expanded folder in the background.
@@ -872,6 +864,21 @@ fn collapse_to_root(root: Option<&Path>, expanded: &mut HashSet<PathBuf>) -> boo
     expanded.len() != before
 }
 
+/// Open every folder above `path` that sits under `root`, so the file is on
+/// screen. Returns whether `expanded` gained anything.
+fn expand_to_reveal(root: &Path, path: &Path, expanded: &mut HashSet<PathBuf>) -> bool {
+    let mut revealed = false;
+    let mut dir = path.parent();
+    while let Some(folder) = dir {
+        if !folder.starts_with(root) {
+            break;
+        }
+        revealed |= expanded.insert(folder.to_path_buf());
+        dir = folder.parent();
+    }
+    revealed
+}
+
 /// A path's file name for dialog text, falling back to the whole path.
 fn display_name(path: &Path) -> String {
     path.file_name()
@@ -1024,5 +1031,43 @@ mod tests {
         assert_eq!(expanded, expected);
         // A second press has nothing left to collapse.
         assert!(!collapse_to_root(Some(root), &mut expanded));
+    }
+
+    #[test]
+    fn expand_to_reveal_opens_the_folders_above_a_file() {
+        let root = Path::new("/work/notes");
+        let file = Path::new("/work/notes/2026/feb/plan.md");
+        let mut expanded: HashSet<PathBuf> = [root.to_path_buf()].into_iter().collect();
+
+        // Both folders on the way down, so the file has a row to sit on.
+        assert!(expand_to_reveal(root, file, &mut expanded));
+        let expected: HashSet<PathBuf> = [
+            root.to_path_buf(),
+            PathBuf::from("/work/notes/2026"),
+            PathBuf::from("/work/notes/2026/feb"),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(expanded, expected);
+        // A second look has everything it needs already open.
+        assert!(!expand_to_reveal(root, file, &mut expanded));
+    }
+
+    #[test]
+    fn expand_to_reveal_leaves_everything_else_alone() {
+        let root = Path::new("/work/notes");
+        let mut expanded: HashSet<PathBuf> = [root.to_path_buf()].into_iter().collect();
+
+        // A file outside the open folder, and the folder itself, expand nothing.
+        assert!(!expand_to_reveal(
+            root,
+            Path::new("/elsewhere/x.md"),
+            &mut expanded
+        ));
+        assert!(!expand_to_reveal(root, root, &mut expanded));
+        assert_eq!(
+            expanded,
+            [root.to_path_buf()].into_iter().collect::<HashSet<_>>()
+        );
     }
 }
