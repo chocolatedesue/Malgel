@@ -180,6 +180,49 @@ impl PdfDocument {
     }
 }
 
+/// The page indexes each row shows, in order: one per row, or `per_row`.
+fn page_rows(count: usize, per_row: usize) -> Vec<Vec<usize>> {
+    let per_row = per_row.max(1);
+    (0..count)
+        .step_by(per_row)
+        .map(|start| (start..(start + per_row).min(count)).collect())
+        .collect()
+}
+
+/// The zoom a fit mode resolves to for a viewport, given every row of page
+/// sizes as (width, height) pairs. A row holds one page, or two side by side.
+fn fit_zoom(
+    mode: FitMode,
+    custom_zoom: f32,
+    rows: &[Vec<(f32, f32)>],
+    viewport: (f32, f32),
+) -> f32 {
+    let avail_width = (viewport.0 - 2. * PAGE_MARGIN - 12.).max(1.);
+    let avail_height = (viewport.1 - 2. * PAGE_MARGIN).max(1.);
+    let row_width = |row: &[(f32, f32)]| {
+        row.iter().map(|(width, _)| *width).sum::<f32>()
+            + PAGE_GAP * row.len().saturating_sub(1) as f32
+    };
+    match mode {
+        FitMode::Custom => custom_zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+        FitMode::Width => {
+            let widest = rows.iter().map(|row| row_width(row)).fold(1.0f32, f32::max);
+            (avail_width / widest).clamp(MIN_ZOOM, MAX_ZOOM)
+        }
+        FitMode::Page => {
+            let first = rows.first().map(Vec::as_slice).unwrap_or(&[]);
+            let width = row_width(first).max(1.);
+            let height = first
+                .iter()
+                .map(|(_, height)| *height)
+                .fold(1.0f32, f32::max);
+            (avail_width / width)
+                .min(avail_height / height)
+                .clamp(MIN_ZOOM, MAX_ZOOM)
+        }
+    }
+}
+
 /// A GPUI view displaying a scrollable PDF document.
 pub struct PdfView {
     path: Option<PathBuf>,
@@ -241,11 +284,7 @@ impl PdfView {
 
     /// The page indexes each row shows, in order.
     fn rows(&self) -> Vec<Vec<usize>> {
-        let per_row = self.per_row();
-        (0..self.page_count())
-            .step_by(per_row)
-            .map(|start| (start..(start + per_row).min(self.page_count())).collect())
-            .collect()
+        page_rows(self.page_count(), self.per_row())
     }
 
     /// The path of the open document, if opened from disk.
@@ -337,36 +376,21 @@ impl PdfView {
         if doc.pages.is_empty() {
             return DEFAULT_ZOOM;
         }
-        let avail_width = (viewport.width.as_f32() - 2. * PAGE_MARGIN - 12.).max(1.);
-        let avail_height = (viewport.height.as_f32() - 2. * PAGE_MARGIN).max(1.);
-        // A spread row is wider than a single page by the page next to it and
-        // the gap between them, so fitting has to allow for both.
-        let row_width = |row: &[usize]| {
-            row.iter().map(|&ix| doc.pages[ix].width).sum::<f32>()
-                + PAGE_GAP * row.len().saturating_sub(1) as f32
-        };
-        match self.fit {
-            FitMode::Custom => self.custom_zoom.clamp(MIN_ZOOM, MAX_ZOOM),
-            FitMode::Width => {
-                let widest = self
-                    .rows()
-                    .iter()
-                    .map(|row| row_width(row))
-                    .fold(1.0f32, f32::max);
-                (avail_width / widest).clamp(MIN_ZOOM, MAX_ZOOM)
-            }
-            FitMode::Page => {
-                let row = self.rows().first().cloned().unwrap_or_default();
-                let width = row_width(&row).max(1.);
-                let height = row
-                    .iter()
-                    .map(|&ix| doc.pages[ix].height)
-                    .fold(1.0f32, f32::max);
-                (avail_width / width)
-                    .min(avail_height / height)
-                    .clamp(MIN_ZOOM, MAX_ZOOM)
-            }
-        }
+        let rows: Vec<Vec<(f32, f32)>> = self
+            .rows()
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|ix| (doc.pages[ix].width, doc.pages[ix].height))
+                    .collect()
+            })
+            .collect();
+        fit_zoom(
+            self.fit,
+            self.custom_zoom,
+            &rows,
+            (viewport.width.as_f32(), viewport.height.as_f32()),
+        )
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -723,5 +747,43 @@ mod tests {
     fn reports_error_on_invalid_pdf_bytes() {
         let invalid = b"NOT A VALID PDF FILE".to_vec();
         assert!(PdfDocument::from_bytes(invalid).is_err());
+    }
+
+    #[test]
+    fn page_rows_pairs_pages_only_when_spread() {
+        assert_eq!(page_rows(4, 1), vec![vec![0], vec![1], vec![2], vec![3]]);
+        assert_eq!(page_rows(5, 2), vec![vec![0, 1], vec![2, 3], vec![4]]);
+        assert_eq!(page_rows(1, 2), vec![vec![0]]);
+        assert!(page_rows(0, 2).is_empty());
+    }
+
+    #[test]
+    fn fit_width_shares_the_viewport_between_two_pages() {
+        let page = (600.0, 800.0);
+        let viewport = (1260.0, 900.0);
+        // 1260 - 2 * 24 - 12 = 1200 usable, so one page fits at 2x…
+        let single = fit_zoom(FitMode::Width, 1.0, &[vec![page], vec![page]], viewport);
+        assert!((single - 2.0).abs() < 0.001, "got {single}");
+        // …and a pair sits at nearly half of that, leaving room for the
+        // page beside it.
+        let spread = fit_zoom(FitMode::Width, 1.0, &[vec![page, page]], viewport);
+        assert!((spread - 0.9836).abs() < 0.001, "got {spread}");
+    }
+
+    #[test]
+    fn fit_page_measures_the_whole_row() {
+        let page = (600.0, 800.0);
+        // 1400 - 60 = 1340 wide, 700 - 48 = 652 high: the height binds.
+        let zoom = fit_zoom(FitMode::Page, 1.0, &[vec![page, page]], (1400.0, 700.0));
+        assert!((zoom - 0.815).abs() < 0.001, "got {zoom}");
+    }
+
+    #[test]
+    fn custom_zoom_passes_through_the_clamp() {
+        assert_eq!(fit_zoom(FitMode::Custom, 3.5, &[], (1000.0, 800.0)), 3.5);
+        assert_eq!(
+            fit_zoom(FitMode::Custom, 100.0, &[], (1000.0, 800.0)),
+            MAX_ZOOM
+        );
     }
 }
