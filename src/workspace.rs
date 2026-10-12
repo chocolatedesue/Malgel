@@ -215,7 +215,7 @@ impl Workspace {
                 |this, _, event, window, cx| match event {
                     FileTreeEvent::Open { path, preview } => this.open_paths(
                         vec![path.clone()],
-                        if preview {
+                        if *preview {
                             Placement::Preview
                         } else {
                             Placement::NewTab
