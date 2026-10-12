@@ -53,7 +53,7 @@ use crate::{
     format,
     links::{self, LinkTarget},
     pdf::{self, Paper},
-    rich_copy,
+    quick_open, rich_copy,
     session::{self, DiskStamp, Session, SessionDocument, WindowPlacement},
     settings::{Appearance, Layout, LinkPlacement, clamp_font_size},
     spell,
@@ -143,6 +143,7 @@ pub struct Workspace {
     documents: Vec<Entity<DocumentView>>,
     active: usize,
     headings: Entity<CommandState>,
+    quick_open: Entity<CommandState>,
     file_tree: Entity<FileTree>,
     app_menu_bar: Entity<AppMenuBar>,
 
@@ -179,6 +180,7 @@ impl Workspace {
     ) -> Self {
         let settings = AppSettings::get(cx).clone();
         let headings = cx.new(|cx| CommandState::new(window, cx));
+        let quick_open = cx.new(|cx| CommandState::new(window, cx));
         let file_tree = cx.new(FileTree::new);
 
         let subscriptions = vec![
@@ -242,6 +244,7 @@ impl Workspace {
             documents: Vec::new(),
             active: 0,
             headings,
+            quick_open,
             file_tree,
             app_menu_bar,
             window_title: String::new(),
@@ -1905,6 +1908,84 @@ impl Workspace {
         });
     }
 
+    /// List the files in the open folder and open the picked one, the way VS
+    /// Code's Go to File (Ctrl+P, ⌘P) does.
+    fn show_quick_open(&mut self, _: &QuickOpen, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let Some(root) = self.file_tree.read(cx).root().map(Path::to_path_buf) else {
+            window.push_notification(Notification::info("Open a folder to search its files."), cx);
+            return;
+        };
+        let files = quick_open::files_under(
+            &root,
+            AppSettings::get(cx).show_hidden_entries,
+            quick_open::MAX_FILES,
+        );
+        if files.is_empty() {
+            window.push_notification(Notification::info("No files in this folder yet."), cx);
+            return;
+        }
+        self.quick_open
+            .update(cx, |state, cx| state.set_query("", window, cx));
+        let state = self.quick_open.clone();
+        let listing = files.clone();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let focus = state.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+            let items = listing.iter().map(|path| {
+                let shown: SharedString = path
+                    .strip_prefix(&root)
+                    .unwrap_or(path.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .into();
+                let name: SharedString = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default()
+                    .into();
+                let icon = if document::is_markdown_path(path) {
+                    IconName::FileText
+                } else {
+                    IconName::File
+                };
+                CommandItem::new()
+                    .label(shown.clone())
+                    .keywords([shown, name])
+                    .icon(Icon::new(icon))
+            });
+            let picked = listing.clone();
+            dialog.close_button(false).p_0().child(
+                Command::new(&state)
+                    .bordered(false)
+                    .placeholder("Search files by name")
+                    .max_h(rems(24.))
+                    .items(items)
+                    .empty(|_, _, _| "No matching files")
+                    .on_confirm(move |index: IndexPath, window, cx| {
+                        window.close_dialog(cx);
+                        let Some(path) = picked.get(index.row).cloned() else {
+                            return;
+                        };
+                        window.dispatch_action(Box::new(OpenQuickPath(path)), cx);
+                    })
+                    .on_cancel(|window, cx| window.close_dialog(cx)),
+            )
+        });
+    }
+
+    /// Open a file picked from the Quick Open palette.
+    fn open_quick_path(
+        &mut self,
+        action: &OpenQuickPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_paths(vec![action.0.clone()], window, cx);
+    }
+
     fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
         AppSettings::update(cx, |settings| {
             settings.font_size = if delta == 0. {
@@ -3094,6 +3175,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::set_layout))
             .on_action(cx.listener(Self::go_to_heading))
+            .on_action(cx.listener(Self::show_quick_open))
+            .on_action(cx.listener(Self::open_quick_path))
             .on_action(cx.listener(Self::toggle_appearance))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::open_settings))

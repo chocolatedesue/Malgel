@@ -37,7 +37,8 @@ use crate::workspace::DragGhost;
 use crate::actions::OpenFolder;
 
 /// Entries hidden by default, matching VS Code's `files.exclude`.
-const DEFAULT_EXCLUDED: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
+pub(crate) const DEFAULT_EXCLUDED: &[&str] =
+    &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {

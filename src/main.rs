@@ -22,6 +22,7 @@ mod menus;
 mod pdf;
 pub mod pdf_view;
 mod preview_ext;
+mod quick_open;
 mod rich_copy;
 mod session;
 mod settings;

@@ -3,6 +3,8 @@
 //! Every command is an Action so the title bar, the menu bar, the editor's
 //! context menu and the keyboard all dispatch the same thing.
 
+use std::path::PathBuf;
+
 use gpui_kit::{Action, App, KeyBinding, SharedString, actions};
 use serde::Deserialize;
 
@@ -47,6 +49,7 @@ actions!(
         ZoomOut,
         ZoomReset,
         GoToHeading,
+        QuickOpen,
         Bold,
         Italic,
         Strikethrough,
@@ -119,6 +122,12 @@ pub struct FollowLink {
 #[action(namespace = malgel, no_json)]
 pub struct ViewDiagram(pub SharedString);
 
+/// Open the file picked in the Quick Open palette. The palette's callback has
+/// no access to the workspace, so it hands the path back as an action.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = malgel, no_json)]
+pub struct OpenQuickPath(pub PathBuf);
+
 /// Accept a word as correctly spelled from now on.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = malgel, no_json)]
@@ -167,6 +176,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-0", ZoomReset, None),
         KeyBinding::new("secondary-shift-l", ToggleAppearance, None),
         KeyBinding::new("secondary-shift-o", GoToHeading, workspace),
+        KeyBinding::new("secondary-p", QuickOpen, workspace),
         KeyBinding::new("secondary-b", Bold, workspace),
         KeyBinding::new("secondary-i", Italic, workspace),
         KeyBinding::new("secondary-shift-x", Strikethrough, workspace),
