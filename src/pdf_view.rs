@@ -15,15 +15,17 @@ use std::{
 };
 
 use gpui_kit::{
-    App, Context, ElementId, FocusHandle, Focusable, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, ParentElement as _, PinchEvent, Pixels, Render, ScrollDelta, ScrollStrategy,
-    ScrollWheelEvent, Size, Styled as _, Window,
+    Anchor, App, Context, ElementId, FocusHandle, Focusable, Image, ImageFormat,
+    InteractiveElement as _, IntoElement, ParentElement as _, PinchEvent, Pixels, Render,
+    ScrollDelta, ScrollStrategy, ScrollWheelEvent, Size, Styled as _, Window,
     assets::IconName,
     base::Disableable as _,
     component::{
         ActiveTheme as _, Icon, Sizable as _, VirtualListScrollHandle,
         button::{Button, ButtonVariants as _},
-        h_flex, v_flex, v_virtual_list,
+        h_flex,
+        menu::{DropdownMenu as _, PopupMenuItem},
+        v_flex, v_virtual_list,
     },
     div, img,
     prelude::FluentBuilder as _,
@@ -40,17 +42,8 @@ use hayro_svg::{
 };
 
 use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
+use crate::zoom;
 
-/// Default zoom factor (100%).
-pub const DEFAULT_ZOOM: f32 = 1.0;
-/// Minimum allowed zoom (10%).
-pub const MIN_ZOOM: f32 = 0.1;
-/// Maximum allowed zoom (800%).
-pub const MAX_ZOOM: f32 = 8.0;
-/// Multiplier for zoom in / out steps.
-pub const ZOOM_STEP: f32 = 1.25;
-/// Multiplier for one notch of the mouse wheel.
-const WHEEL_STEP: f32 = 1.2;
 /// How a document is zoomed when it is opened: the whole first page, the way
 /// a PDF reader shows a file it has not seen before. The image viewer opens
 /// the same way.
@@ -211,10 +204,10 @@ fn fit_zoom(
             + PAGE_GAP * row.len().saturating_sub(1) as f32
     };
     match mode {
-        FitMode::Custom => custom_zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+        FitMode::Custom => custom_zoom.clamp(zoom::MIN, zoom::MAX),
         FitMode::Width => {
             let widest = rows.iter().map(|row| row_width(row)).fold(1.0f32, f32::max);
-            (avail_width / widest).clamp(MIN_ZOOM, MAX_ZOOM)
+            (avail_width / widest).clamp(zoom::MIN, zoom::MAX)
         }
         FitMode::Page => {
             let first = rows.first().map(Vec::as_slice).unwrap_or(&[]);
@@ -225,7 +218,7 @@ fn fit_zoom(
                 .fold(1.0f32, f32::max);
             (avail_width / width)
                 .min(avail_height / height)
-                .clamp(MIN_ZOOM, MAX_ZOOM)
+                .clamp(zoom::MIN, zoom::MAX)
         }
     }
 }
@@ -262,8 +255,8 @@ impl PdfView {
             title,
             doc: Some(doc),
             fit: DEFAULT_FIT,
-            zoom: DEFAULT_ZOOM,
-            custom_zoom: DEFAULT_ZOOM,
+            zoom: zoom::DEFAULT,
+            custom_zoom: zoom::DEFAULT,
             spread: false,
             current_page: 0,
             scroll: VirtualListScrollHandle::new(),
@@ -321,22 +314,22 @@ impl PdfView {
 
     /// Zoom in by one step.
     pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom * ZOOM_STEP, cx);
+        self.set_zoom(self.zoom * zoom::BUTTON_STEP, cx);
     }
 
     /// Zoom out by one step.
     pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom / ZOOM_STEP, cx);
+        self.set_zoom(self.zoom / zoom::BUTTON_STEP, cx);
     }
 
     /// Reset zoom level back to 100%.
     pub fn reset_zoom(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(DEFAULT_ZOOM, cx);
+        self.set_zoom(zoom::DEFAULT, cx);
     }
 
     /// Set an explicit zoom factor, switching to custom zoom.
     pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        let clamped = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        let clamped = zoom.clamp(zoom::MIN, zoom::MAX);
         if self.fit != FitMode::Custom || (self.custom_zoom - clamped).abs() > f32::EPSILON {
             self.fit = FitMode::Custom;
             self.custom_zoom = clamped;
@@ -358,7 +351,7 @@ impl PdfView {
             return;
         }
         let factor = match event.delta {
-            ScrollDelta::Lines(lines) => WHEEL_STEP.powf(lines.y.clamp(-1., 1.)),
+            ScrollDelta::Lines(lines) => zoom::WHEEL_STEP.powf(lines.y.clamp(-1., 1.)),
             ScrollDelta::Pixels(delta) => (f32::from(delta.y) / 200.).exp(),
         };
         self.set_zoom(self.zoom * factor, cx);
@@ -404,10 +397,10 @@ impl PdfView {
     /// The zoom factor a fit mode resolves to for a given viewport.
     fn resolved_zoom(&self, viewport: Size<Pixels>) -> f32 {
         let Some(doc) = &self.doc else {
-            return DEFAULT_ZOOM;
+            return zoom::DEFAULT;
         };
         if doc.pages.is_empty() {
-            return DEFAULT_ZOOM;
+            return zoom::DEFAULT;
         }
         let rows: Vec<Vec<(f32, f32)>> = self
             .rows()
@@ -428,9 +421,10 @@ impl PdfView {
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let zoom_pct = format!("{:.0}%", self.zoom * 100.0);
+        let zoom_pct = zoom::percent(self.zoom);
         let total = self.page_count();
         let current = (self.current_page + 1).min(total.max(1));
+        let menu_entity = cx.entity();
 
         h_flex()
             .id("pdf-toolbar")
@@ -504,25 +498,49 @@ impl PdfView {
                             ),
                     )
                     .child(
-                        Button::new("pdf-zoom-reset")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .label(zoom_pct)
-                            .tooltip("Actual size (100%)")
-                            .toggled(self.fit == FitMode::Custom)
-                            .disabled(total == 0)
-                            .on_click(cx.listener(|this, _, _, cx| this.reset_zoom(cx))),
-                    )
-                    .child(
                         Button::new("pdf-zoom-out")
                             .ghost()
                             .small()
                             .compact()
                             .icon(Icon::new(IconName::ZoomOut))
                             .tooltip("Zoom out")
-                            .disabled(total == 0 || self.zoom <= MIN_ZOOM)
+                            .disabled(total == 0 || self.zoom <= zoom::MIN)
                             .on_click(cx.listener(|this, _, _, cx| this.zoom_out(cx))),
+                    )
+                    // The same percentage menu the image viewer shows, in the
+                    // same order: one press of a zoom button or one entry in
+                    // the list has to mean the same thing in both viewers.
+                    .child(
+                        Button::new("pdf-zoom-menu")
+                            .ghost()
+                            .small()
+                            .compact()
+                            .label(zoom_pct)
+                            .tooltip("Zoom")
+                            .disabled(total == 0)
+                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                                let mut menu = menu;
+                                for &(factor, label) in zoom::PRESETS {
+                                    let entity = menu_entity.clone();
+                                    menu = menu.item(PopupMenuItem::new(label).on_click(
+                                        move |_, _, cx| {
+                                            entity.update(cx, |this, cx| this.set_zoom(factor, cx));
+                                        },
+                                    ));
+                                }
+                                let fit_width = menu_entity.clone();
+                                let fit_page = menu_entity.clone();
+                                menu.item(PopupMenuItem::new("Fit width").on_click(
+                                    move |_, _, cx| {
+                                        fit_width.update(cx, |this, cx| this.fit_width(cx));
+                                    },
+                                ))
+                                .item(
+                                    PopupMenuItem::new("Fit page").on_click(move |_, _, cx| {
+                                        fit_page.update(cx, |this, cx| this.fit_page(cx));
+                                    }),
+                                )
+                            }),
                     )
                     .child(
                         Button::new("pdf-zoom-in")
@@ -531,7 +549,7 @@ impl PdfView {
                             .compact()
                             .icon(Icon::new(IconName::ZoomIn))
                             .tooltip("Zoom in")
-                            .disabled(total == 0 || self.zoom >= MAX_ZOOM)
+                            .disabled(total == 0 || self.zoom >= zoom::MAX)
                             .on_click(cx.listener(|this, _, _, cx| this.zoom_in(cx))),
                     )
                     .child(div().w(px(1.)).h_4().bg(theme.border).mx_1())
@@ -820,7 +838,7 @@ mod tests {
         let page = (595.0, 842.0);
         let viewport = (1173.0, 789.0);
         assert_eq!(DEFAULT_FIT, FitMode::Page);
-        let zoom = fit_zoom(DEFAULT_FIT, DEFAULT_ZOOM, &[vec![page]], viewport);
+        let zoom = fit_zoom(DEFAULT_FIT, zoom::DEFAULT, &[vec![page]], viewport);
         assert!(page.0 * zoom <= viewport.0, "width overflows at {zoom}");
         assert!(page.1 * zoom <= viewport.1, "height overflows at {zoom}");
         assert!(zoom < 1.0, "a page taller than the window must shrink");
@@ -831,7 +849,7 @@ mod tests {
         assert_eq!(fit_zoom(FitMode::Custom, 3.5, &[], (1000.0, 800.0)), 3.5);
         assert_eq!(
             fit_zoom(FitMode::Custom, 100.0, &[], (1000.0, 800.0)),
-            MAX_ZOOM
+            zoom::MAX
         );
     }
 }

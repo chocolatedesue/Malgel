@@ -21,33 +21,10 @@ use gpui_kit::{
     div, img, px,
 };
 
-use crate::pdf_view::FitMode;
+use crate::{pdf_view::FitMode, zoom};
 
-/// Default zoom factor (100%).
-pub const DEFAULT_ZOOM: f32 = 1.0;
-/// Minimum allowed zoom (10%).
-pub const MIN_ZOOM: f32 = 0.1;
-/// Maximum allowed zoom (800%).
-pub const MAX_ZOOM: f32 = 8.0;
-/// Multiplier for the zoom in / out buttons.
-const ZOOM_STEP: f32 = 1.2;
-/// Multiplier for one notch of the mouse wheel.
-const WHEEL_STEP: f32 = 1.2;
 /// Space left around the image when a fit mode sizes it.
 const MARGIN: f32 = 24.;
-
-/// The factors the zoom percentage menu offers.
-const ZOOM_PRESETS: &[(f32, &str)] = &[
-    (0.25, "25%"),
-    (0.5, "50%"),
-    (0.75, "75%"),
-    (1.0, "100%"),
-    (1.25, "125%"),
-    (1.5, "150%"),
-    (2.0, "200%"),
-    (4.0, "400%"),
-    (8.0, "800%"),
-];
 
 /// Map an image extension to the gpui format it decodes as.
 pub fn image_format(path: &Path) -> Option<ImageFormat> {
@@ -128,7 +105,7 @@ fn fit_zoom(mode: FitMode, image_width: f32, image_height: f32, viewport: Size<P
         FitMode::Page => (avail_width / image_width).min(avail_height / image_height),
         _ => avail_width / image_width,
     };
-    fit.min(1.).clamp(MIN_ZOOM, MAX_ZOOM)
+    fit.min(1.).clamp(zoom::MIN, zoom::MAX)
 }
 
 impl ImageView {
@@ -152,28 +129,28 @@ impl ImageView {
             // A screenshot is usually taller than the window, so open at a
             // fit rather than showing its top-left corner.
             fit: FitMode::Page,
-            zoom: DEFAULT_ZOOM,
-            custom_zoom: DEFAULT_ZOOM,
+            zoom: zoom::DEFAULT,
+            custom_zoom: zoom::DEFAULT,
             viewport: gpui_kit::size(px(0.), px(0.)),
             focus_handle: cx.focus_handle(),
         }
     }
 
     pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom * ZOOM_STEP, cx);
+        self.set_zoom(self.zoom * zoom::BUTTON_STEP, cx);
     }
 
     pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom / ZOOM_STEP, cx);
+        self.set_zoom(self.zoom / zoom::BUTTON_STEP, cx);
     }
 
     pub fn reset_zoom(&mut self, cx: &mut Context<Self>) {
-        self.set_zoom(DEFAULT_ZOOM, cx);
+        self.set_zoom(zoom::DEFAULT, cx);
     }
 
     /// Set an explicit zoom factor, leaving whichever fit mode was in effect.
     pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        let clamped = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        let clamped = zoom.clamp(zoom::MIN, zoom::MAX);
         if self.fit != FitMode::Custom || (self.custom_zoom - clamped).abs() > f32::EPSILON {
             self.fit = FitMode::Custom;
             self.custom_zoom = clamped;
@@ -202,10 +179,10 @@ impl ImageView {
     fn resolved_zoom(&self, viewport: Size<Pixels>) -> f32 {
         if viewport.width.as_f32() <= 1. || viewport.height.as_f32() <= 1. {
             // Not measured yet (first frame): keep the last factor.
-            return self.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+            return self.zoom.clamp(zoom::MIN, zoom::MAX);
         }
         match self.fit {
-            FitMode::Custom => self.custom_zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+            FitMode::Custom => self.custom_zoom.clamp(zoom::MIN, zoom::MAX),
             FitMode::Width | FitMode::Page => fit_zoom(self.fit, self.width, self.height, viewport),
         }
     }
@@ -221,7 +198,7 @@ impl ImageView {
         cx: &mut Context<Self>,
     ) {
         let factor = match event.delta {
-            ScrollDelta::Lines(lines) => WHEEL_STEP.powf(lines.y.clamp(-1., 1.)),
+            ScrollDelta::Lines(lines) => zoom::WHEEL_STEP.powf(lines.y.clamp(-1., 1.)),
             ScrollDelta::Pixels(delta) if event.modifiers.secondary() => {
                 (f32::from(delta.y) / 200.).exp()
             }
@@ -239,7 +216,7 @@ impl ImageView {
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let zoom_pct = format!("{:.0}%", self.zoom * 100.0);
+        let zoom_pct = zoom::percent(self.zoom);
         let dims = format!("{} × {} px", self.width as u32, self.height as u32);
 
         let menu_entity = cx.entity();
@@ -307,7 +284,7 @@ impl ImageView {
                             .compact()
                             .icon(Icon::new(IconName::ZoomOut))
                             .tooltip("Zoom out")
-                            .disabled(self.zoom <= MIN_ZOOM)
+                            .disabled(self.zoom <= zoom::MIN)
                             .on_click(cx.listener(|this, _, _, cx| this.zoom_out(cx))),
                     )
                     .child(
@@ -319,7 +296,7 @@ impl ImageView {
                             .tooltip("Zoom")
                             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                                 let mut menu = menu;
-                                for &(factor, label) in ZOOM_PRESETS {
+                                for &(factor, label) in zoom::PRESETS {
                                     let entity = menu_entity.clone();
                                     menu = menu.item(PopupMenuItem::new(label).on_click(
                                         move |_, _, cx| {
@@ -348,7 +325,7 @@ impl ImageView {
                             .compact()
                             .icon(Icon::new(IconName::ZoomIn))
                             .tooltip("Zoom in")
-                            .disabled(self.zoom >= MAX_ZOOM)
+                            .disabled(self.zoom >= zoom::MAX)
                             .on_click(cx.listener(|this, _, _, cx| this.zoom_in(cx))),
                     ),
             )
@@ -483,7 +460,7 @@ mod tests {
         // A panorama far wider than any window sits at the minimum, not below.
         assert_eq!(
             fit_zoom(FitMode::Width, 100_000., 1000., viewport(1000., 800.)),
-            MIN_ZOOM
+            zoom::MIN
         );
     }
 }

@@ -31,6 +31,7 @@ mod spell;
 mod themes;
 mod typst_world;
 mod workspace;
+mod zoom;
 
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
