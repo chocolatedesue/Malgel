@@ -142,6 +142,10 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewFile, None),
         KeyBinding::new("secondary-o", Open, None),
+        // The two-key chord VS Code uses. `secondary-k` is a prefix of it,
+        // so pressing it alone now waits for the chord to complete (or time
+        // out) before inserting a link.
+        KeyBinding::new("secondary-k secondary-o", OpenFolder, workspace),
         KeyBinding::new("secondary-r", OpenRecent(0), workspace),
         KeyBinding::new("secondary-s", Save, workspace),
         KeyBinding::new("secondary-shift-s", SaveAs, workspace),
@@ -194,4 +198,26 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-alt-5", Heading(5), workspace),
         KeyBinding::new("secondary-alt-6", Heading(6), workspace),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `KeyBinding::new` panics on anything it cannot parse, so this also
+    /// guards the spelling of every shortcut in `bind_keys`.
+    #[test]
+    fn the_open_folder_shortcut_is_the_two_key_chord() {
+        let chord = KeyBinding::new("secondary-k secondary-o", OpenFolder, None);
+        assert_eq!(
+            chord.keystrokes().len(),
+            2,
+            "should be a two-keystroke chord"
+        );
+        // The plain shortcuts it has to coexist with stay single keystrokes.
+        let link = KeyBinding::new("secondary-k", InsertLink, None);
+        assert_eq!(link.keystrokes().len(), 1);
+        let open = KeyBinding::new("secondary-o", Open, None);
+        assert_eq!(open.keystrokes().len(), 1);
+    }
 }
