@@ -35,7 +35,7 @@ jobs:
           path-to-signatures: signatures/cla.json
           branch: main
           # The maintainer and bots need not sign.
-          allowlist: rcawston,*[bot]
+          allowlist: rcawston,chocolatedesue,mikasans,*[bot]
           custom-notsigned-prcomment: >-
             Thank you for your contribution! Before we can merge it, please
             read the [Malgel Contributor License Agreement](https://github.com/${{ github.repository }}/blob/main/CLA.md)
