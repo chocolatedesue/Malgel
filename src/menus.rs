@@ -120,8 +120,10 @@ pub fn build(cx: &App) -> Vec<Menu> {
         ),
         MenuItem::separator(),
         MenuItem::action("Close", CloseDocument),
-        MenuItem::action("Close other tabs", CloseOtherTabs),
-        MenuItem::action("Close tabs to the right", CloseTabsToTheRight),
+        // VS Code's File menu carries the close-all and the reopen; the
+        // per-tab closes live on a tab's own menu.
+        MenuItem::action("Close all editors", CloseAllTabs),
+        MenuItem::action("Reopen closed editor", ReopenClosedEditor),
         MenuItem::action("Close window", CloseWindow),
     ];
     if !macos {
@@ -155,6 +157,9 @@ pub fn build(cx: &App) -> Vec<Menu> {
         MenuItem::action("Go to file…", QuickOpen),
         MenuItem::action("Go to heading…", GoToHeading),
         MenuItem::action("Go to line…", GoToLine),
+        MenuItem::separator(),
+        MenuItem::action("Back", GoBack),
+        MenuItem::action("Forward", GoForward),
     ];
 
     let format = vec![

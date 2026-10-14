@@ -103,8 +103,21 @@ shot() { # shot <name>
 }
 colours() { identify -format '%k' "$ART_DIR/$1.png" 2>/dev/null || echo 0; }
 # `compare -metric AE` writes the count to stderr and exits non-zero when the
-# images differ; capture both and keep the number.
-pixels_differ() { compare -metric AE "$ART_DIR/$1.png" "$ART_DIR/$2.png" null: 2>&1 || true; }
+# images differ; capture both and keep the number. ImageMagick prints large
+# counts in exponent form (`1.04984e+06`), which `[[ -gt ]]` cannot read, so
+# `awk` turns the metric back into a whole number.
+pixels_differ() {
+  { compare -metric AE "$ART_DIR/$1.png" "$ART_DIR/$2.png" null: 2>&1 || true; } |
+    awk '{ printf "%.0f", $1 + 0 }'
+}
+# The same, over one region of the window (ImageMagick `WxH+X+Y`), so a check
+# can look at the editor pane alone and ignore the tab bar next to it.
+region_differ() {
+  convert "$ART_DIR/$1.png" -crop "$3" +repage "$ART_DIR/.region-a.png"
+  convert "$ART_DIR/$2.png" -crop "$3" +repage "$ART_DIR/.region-b.png"
+  { compare -metric AE "$ART_DIR/.region-a.png" "$ART_DIR/.region-b.png" null: 2>&1 || true; } |
+    awk '{ printf "%.0f", $1 + 0 }'
+}
 # Dismiss an overlay (palette, Quick Open). The first Escape clears the search
 # box, the second closes; sending both is harmless when one would do.
 dismiss() {
@@ -184,7 +197,68 @@ shot 08-bold
 grep -q '\*\*' "$WS/README.md" || fail "Ctrl+B in the editor did not apply bold"
 pass "Ctrl+B in the editor applies bold (Ctrl+S round-trip)"
 
-# 6. Still alive at the end — no crash from any of the above.
+# 6. The Explorer: Ctrl+Shift+E moves the keyboard into the file tree and
+#    picks the file that is open; F2 renames it, and the file on disk follows.
+xdotool key --clearmodifiers ctrl+shift+e
+shot 09-explorer-focus
+xdotool key --clearmodifiers F2
+shot 10-rename-prompt
+[[ "$(pixels_differ 09-explorer-focus 10-rename-prompt)" -gt 1000 ]] \
+  || fail "F2 did not open the rename prompt"
+xdotool key --clearmodifiers ctrl+a
+xdotool type --delay 40 'renamed.md'
+xdotool key --clearmodifiers Return
+sleep 0.8
+shot 11-after-rename
+[[ -f "$WS/renamed.md" ]] || fail "F2 in the Explorer did not rename the file on disk"
+[[ ! -e "$WS/README.md" ]] || fail "the old name is still on disk after the rename"
+grep -q 'SMOKE' "$WS/renamed.md" || fail "the renamed file lost its contents"
+pass "F2 in the Explorer renames the picked file on disk"
+
+# 7. Close the editor showing a second file, then bring it back with
+#    Ctrl+Shift+T, the way VS Code's Reopen Closed Editor does.
+xdotool key --clearmodifiers ctrl+p
+xdotool type --delay 40 'todo'
+xdotool key --clearmodifiers Return
+sleep 0.8
+shot 12-second-file
+[[ "$(pixels_differ 11-after-rename 12-second-file)" -gt 1000 ]] \
+  || fail "Quick Open did not open the second file"
+xdotool key --clearmodifiers ctrl+w
+sleep 0.6
+shot 13-closed
+[[ "$(pixels_differ 12-second-file 13-closed)" -gt 1000 ]] \
+  || fail "Ctrl+W did not close the second editor"
+xdotool key --clearmodifiers ctrl+shift+t
+sleep 0.8
+shot 14-reopened
+[[ "$(pixels_differ 13-closed 14-reopened)" -gt 1000 ]] \
+  || fail "Ctrl+Shift+T did not reopen the closed editor"
+pass "Ctrl+W closes and Ctrl+Shift+T reopens an editor"
+
+# 8. Pin the tab in front from the palette, then Close All Editors: a pinned
+#    tab survives, the way VS Code leaves pinned tabs alone.
+xdotool windowfocus "$WIN" 2>/dev/null || true
+xdotool key --clearmodifiers ctrl+shift+p
+shot 15-palette-for-pin
+[[ "$(pixels_differ 14-reopened 15-palette-for-pin)" -gt 1000 ]] \
+  || fail "Ctrl+Shift+P did not reopen the command palette"
+xdotool type --delay 40 'pin'
+xdotool key --clearmodifiers Return
+sleep 0.8
+shot 16-pinned
+[[ "$(pixels_differ 14-reopened 16-pinned)" -gt 30 ]] \
+  || fail "pinning the tab did not change the tab bar"
+xdotool key --clearmodifiers ctrl+k ctrl+w
+sleep 0.8
+shot 17-after-close-all
+# The pinned editor keeps its place, so the pane it fills is untouched; only
+# the unpinned tab leaves the tab bar above it.
+[[ "$(region_differ 16-pinned 17-after-close-all 480x600+430+160)" -lt 50 ]] \
+  || fail "Close All Editors closed the pinned editor too"
+pass "a pinned tab survives Close All Editors (Ctrl+K Ctrl+W)"
+
+# 9. Still alive at the end — no crash from any of the above.
 kill -0 "$APP_PID" 2>/dev/null || fail "process died during the run"
 pass "process alive at exit"
 

@@ -15,7 +15,13 @@ application that starts, paints and responds.
    `Ctrl+Shift+P` (command palette), `Ctrl+P` (Quick Open), `Ctrl+B`
    (toggle sidebar) — screenshots each, and asserts the frame actually
    changed, so a shortcut that silently does nothing fails the run.
-5. Checks the process is still alive at the end (no crash from any step).
+5. Focuses the Explorer, renames the picked file with `F2`, and checks the
+   file on disk was renamed and still holds its contents.
+6. Closes an editor with `Ctrl+W` and brings it back with `Ctrl+Shift+T`.
+7. Pins the tab in front from the palette, then runs Close All Editors
+   (`Ctrl+K Ctrl+W`) and checks the editor pane is untouched — the pinned
+   tab stayed.
+8. Checks the process is still alive at the end (no crash from any step).
 
 Screenshots land in `target/e2e-artifacts/` for eyeballing after a failure.
 

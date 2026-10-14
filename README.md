@@ -198,13 +198,16 @@ nothing to bind, the key is left free (Find in Files, Ctrl+Shift+F, for one).
 | New, Open…, Save, Save as… | Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S |
 | Open folder… | Ctrl+K Ctrl+O |
 | Copy as rich text | Ctrl+Alt+C |
-| Close (tab, or window without tabs), Close window, Quit | Ctrl+W, Ctrl+Shift+W, Ctrl+Q |
+| Close (tab, or window without tabs), Close all editors, Close window, Quit | Ctrl+W, Ctrl+K Ctrl+W, Ctrl+Shift+W, Ctrl+Q |
+| Reopen closed editor | Ctrl+Shift+T |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | File sidebar, Outline, Focus mode | Ctrl+B, Ctrl+Alt+O, Ctrl+Alt+F |
+| Explorer (show and focus the file tree) | Ctrl+Shift+E |
 | Settings | Ctrl+, |
 | Editor / Editor and preview / Preview | Ctrl+1 / Ctrl+2 / Ctrl+3 |
 | Go to file…, Go to line… | Ctrl+P, Ctrl+G |
 | Go to heading… | Ctrl+Shift+O |
+| Back / forward through the editors shown | Alt+← / Alt+→ |
 | Find…, Replace… | Ctrl+F, Ctrl+H |
 | Toggle word wrap | Alt+Z |
 | Bold, Italic, Strikethrough | Ctrl+B, Ctrl+I, Ctrl+Shift+X |
@@ -212,6 +215,18 @@ nothing to bind, the key is left free (Find in Files, Ctrl+Shift+F, for one).
 | Heading 1–6 | Ctrl+Alt+1 … Ctrl+Alt+6 |
 | Quote, Bulleted, Numbered, Task list | Ctrl+Shift+., Ctrl+Shift+8, Ctrl+Shift+7, Ctrl+Shift+9 |
 | Zoom in / out / actual size | Ctrl+=, Ctrl+-, Ctrl+0 |
+
+While the file tree has the keyboard — click a folder row, or press
+Ctrl+Shift+E — the Explorer's own keys apply, as in VS Code:
+
+| Command | Shortcut |
+| --- | --- |
+| Move the pick, open and close folders | ↑ ↓ ← → |
+| First / last entry | Home / End |
+| Open the picked file, or open and close a folder | Enter |
+| Rename | F2 |
+| Delete | Del or Backspace |
+| Cut / copy / paste | Ctrl+X / Ctrl+C / Ctrl+V |
 
 Ctrl+B toggles the sidebar from the workspace and bolds from inside the
 editor, as in VS Code; Export and the light/dark switch live in the menus.
@@ -247,8 +262,8 @@ dictionaries and on macOS those in `~/Library/Spelling` are found too.
 | `src/workspace.rs` | The window: title bar, tabs, sidebars, status bar, settings, file commands, watching files, the session |
 | `src/document_view.rs` | One document: editor and preview, scroll sync, smart keys and paste, spelling, focus mode, recovery |
 | `src/smart_edit.rs` | List continuation and nesting, table navigation and tidying, paste as link — pure and tested |
-| `src/file_tree.rs` | The file sidebar |
-| `src/commands.rs` | The command palette's grouped command list |
+| `src/file_tree.rs` | The file sidebar: the tree, and creating, renaming, deleting, cutting, copying and pasting entries |
+| `src/commands.rs` | The command palette's grouped command list, and the Action behind each row |
 | `src/file_icon.rs` | The icon a file type draws with, in the tree, tabs and palette |
 | `src/spell.rs` | Spell checking of prose with Hunspell dictionaries |
 | `src/session.rs` | The last session and recovered unsaved changes |

@@ -136,6 +136,14 @@ enum Placement {
     ReplaceActive,
 }
 
+/// What the one-line prompt the file tree opens is asking for.
+#[derive(Clone, Copy)]
+enum TreePromptKind {
+    NewFile,
+    NewFolder,
+    Rename,
+}
+
 /// What the watcher found for one open file.
 enum DiskChange {
     Missing,
@@ -198,6 +206,8 @@ pub struct Workspace {
     /// (Ctrl+G). Each keeps its own query and focus across openings.
     command_palette: Entity<CommandState>,
     go_to_line: Entity<CommandState>,
+    /// The one-line prompt New File / New Folder / Rename ask their name in.
+    tree_prompt: Entity<CommandState>,
     file_tree: Entity<FileTree>,
     app_menu_bar: Entity<AppMenuBar>,
 
@@ -208,6 +218,16 @@ pub struct Workspace {
     discarded: HashSet<EntityId>,
     /// Files changed on disk that are waiting for the user to decide.
     pending_disk_prompt: HashSet<EntityId>,
+    /// The paths of editors closed recently, newest last, so Ctrl+Shift+T
+    /// can bring the last one back the way VS Code does.
+    closed_documents: Vec<PathBuf>,
+    /// Tabs held open: Close Other Tabs and Close All Editors leave them
+    /// alone, and their close box becomes a pin, as in VS Code.
+    pinned: HashSet<EntityId>,
+    /// The files the window has shown, newest last, and where it is in that
+    /// list — Alt+← and Alt+→ walk it, as VS Code's editor history does.
+    nav_history: Vec<PathBuf>,
+    nav_index: usize,
     last_session: Option<Session>,
     /// Where a dragged tab would land while the pointer moves across the
     /// tab bar (VS Code's insertion line), `None` when no tab is dragging.
@@ -237,6 +257,7 @@ impl Workspace {
         let quick_open = cx.new(|cx| CommandState::new(window, cx));
         let command_palette = cx.new(|cx| CommandState::new(window, cx));
         let go_to_line = cx.new(|cx| CommandState::new(window, cx));
+        let tree_prompt = cx.new(|cx| CommandState::new(window, cx));
         let file_tree = cx.new(FileTree::new);
 
         let subscriptions = vec![
@@ -270,6 +291,9 @@ impl Workspace {
                     }
                     FileTreeEvent::Moved { from, to } => {
                         this.retarget_moved(from, to, window, cx);
+                    }
+                    FileTreeEvent::Deleted { paths } => {
+                        this.close_deleted_documents(paths, window, cx);
                     }
                 },
             ),
@@ -313,12 +337,17 @@ impl Workspace {
             quick_open,
             command_palette,
             go_to_line,
+            tree_prompt,
             file_tree,
             app_menu_bar,
             window_title: String::new(),
             closing: false,
             discarded: HashSet::new(),
             pending_disk_prompt: HashSet::new(),
+            closed_documents: Vec::new(),
+            pinned: HashSet::new(),
+            nav_history: Vec::new(),
+            nav_index: 0,
             last_session: None,
             tab_insertion: None,
             tab_bar_bounds: Cell::new(None),
@@ -532,10 +561,15 @@ impl Workspace {
         let Some(ix) = self.document_index(id) else {
             return;
         };
+        // Remember where it was, so Reopen Closed Editor can bring it back.
+        if let Some(path) = self.documents[ix].read(cx).path().cloned() {
+            self.remember_closed(path);
+        }
         let doc = self.documents.remove(ix);
         doc.update(cx, |doc, _| doc.discard_recovery());
         self.document_subscriptions
             .retain(|(subscribed, _)| *subscribed != id);
+        self.pinned.remove(&id);
         self.unpreview(id);
         if self.documents.is_empty() {
             let doc =
@@ -636,10 +670,45 @@ impl Workspace {
             return;
         }
         self.active = ix.min(self.documents.len() - 1);
+        if let Some(path) = self.documents[self.active].read(cx).path().cloned() {
+            self.record_navigation(path);
+        }
         self.focus_active(window, cx);
         self.sync_file_tree(cx);
         self.save_session(window, cx);
         cx.notify();
+    }
+
+    /// Note the file being shown, so Alt+← can come back to it. Nothing is
+    /// added twice in a row, and anything the history had ahead of the
+    /// current entry is dropped — the way a new branch replaces the redo
+    /// tail in a browser.
+    fn record_navigation(&mut self, path: PathBuf) {
+        if self.nav_history.get(self.nav_index) == Some(&path) {
+            // The cursor is already on this file: Alt+← or Alt+→ put it
+            // there, and the move is not a visit of its own.
+            return;
+        }
+        if self.nav_history.last() == Some(&path) {
+            return;
+        }
+        self.nav_history.truncate(self.nav_index + 1);
+        self.nav_history.push(path);
+        if self.nav_history.len() > 50 {
+            self.nav_history.remove(0);
+        }
+        self.nav_index = self.nav_history.len().saturating_sub(1);
+    }
+
+    /// Remember a closed editor's file for Reopen Closed Editor, newest
+    /// last. A path that is already in the list moves to the end.
+    fn remember_closed(&mut self, path: PathBuf) {
+        self.closed_documents
+            .retain(|remembered| remembered != &path);
+        self.closed_documents.push(path);
+        if self.closed_documents.len() > 20 {
+            self.closed_documents.remove(0);
+        }
     }
 
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
@@ -1248,7 +1317,8 @@ impl Workspace {
             .documents
             .iter()
             .map(|doc| doc.entity_id())
-            .filter(|id| *id != keep_id)
+            // A pinned tab stays, as it does in VS Code.
+            .filter(|id| *id != keep_id && !self.pinned.contains(id))
             .collect();
         self.confirm_close_documents(targets, window, cx);
     }
@@ -1277,6 +1347,282 @@ impl Workspace {
             .map(|doc| doc.entity_id())
             .collect();
         self.confirm_close_documents(targets, window, cx);
+    }
+
+    /// Close every editor that is not pinned, the way VS Code's Close All
+    /// Editors (Ctrl+K W) does.
+    fn close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
+        let targets: Vec<EntityId> = self
+            .documents
+            .iter()
+            .map(|doc| doc.entity_id())
+            .filter(|id| !self.pinned.contains(id))
+            .collect();
+        self.confirm_close_documents(targets, window, cx);
+    }
+
+    /// Pin a tab, or let it go: Close Other Tabs and Close All Editors leave
+    /// a pinned tab alone, and its close box turns into a pin.
+    fn toggle_pin_by_id(&mut self, id: EntityId, cx: &mut Context<Self>) {
+        if !self.pinned.remove(&id) {
+            self.pinned.insert(id);
+        }
+        cx.notify();
+    }
+
+    /// The same thing from the keyboard or the palette, on the tab in front.
+    fn pin_tab(&mut self, _: &PinTab, _: &mut Window, cx: &mut Context<Self>) {
+        let id = self.active_document().entity_id();
+        self.toggle_pin_by_id(id, cx);
+    }
+
+    /// Bring back the most recently closed editor, the way Ctrl+Shift+T
+    /// does. Files that have since gone are skipped.
+    fn reopen_closed_editor(
+        &mut self,
+        _: &ReopenClosedEditor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        while let Some(path) = self.closed_documents.pop() {
+            if path.is_file() {
+                self.open_paths(vec![path], Placement::Default, window, cx);
+                return;
+            }
+        }
+    }
+
+    /// Close the editors whose files the file tree just deleted. The file is
+    /// gone, so there is nothing left to save and nothing to ask about.
+    fn close_deleted_documents(
+        &mut self,
+        deleted: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets: Vec<EntityId> = self
+            .documents
+            .iter()
+            .filter(|doc| {
+                doc.read(cx)
+                    .path()
+                    .is_some_and(|path| deleted.iter().any(|gone| path.starts_with(gone)))
+            })
+            .map(|doc| doc.entity_id())
+            .collect();
+        for id in targets {
+            self.remove_document(id, window, cx);
+        }
+    }
+
+    /// Show the file the history cursor moved to, opening it again if it is
+    /// not open any more.
+    fn navigate_to(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self
+            .documents
+            .iter()
+            .position(|doc| doc.read(cx).path() == Some(&path))
+        {
+            self.activate(ix, window, cx);
+        } else if path.is_file() {
+            self.open_paths(vec![path], Placement::Default, window, cx);
+        }
+    }
+
+    /// Alt+←: the file shown before this one.
+    fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nav_index == 0 || self.nav_history.is_empty() {
+            return;
+        }
+        self.nav_index -= 1;
+        let path = self.nav_history[self.nav_index].clone();
+        self.navigate_to(path, window, cx);
+    }
+
+    /// Alt+→: the file the history walked back out of.
+    fn go_forward(&mut self, _: &GoForward, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nav_index + 1 >= self.nav_history.len() {
+            return;
+        }
+        self.nav_index += 1;
+        let path = self.nav_history[self.nav_index].clone();
+        self.navigate_to(path, window, cx);
+    }
+
+    // ---------------------------------------------------------------------
+    // The file tree's commands
+
+    /// VS Code's Explorer (Ctrl+Shift+E): show the sidebar, put the keyboard
+    /// in the tree, and pick the file that is open, so F2, Del and the arrow
+    /// keys act on something.
+    fn focus_explorer(&mut self, _: &FocusExplorer, window: &mut Window, cx: &mut Context<Self>) {
+        if !AppSettings::get(cx).file_sidebar || AppSettings::get(cx).focus_mode {
+            self.toggle(
+                |settings| {
+                    settings.file_sidebar = true;
+                    settings.focus_mode = false;
+                },
+                cx,
+            );
+        }
+        let focus = self.file_tree.read(cx).focus_handle(cx);
+        self.file_tree.update(cx, |tree, cx| tree.select_active(cx));
+        window.defer(cx, move |window, cx| focus.focus(window, cx));
+    }
+
+    /// New File (the Explorer's, not the editor's): ask for a name, then
+    /// create it in the folder the tree's selection points at.
+    fn tree_new_file(&mut self, _: &NewFileInTree, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_tree_name(TreePromptKind::NewFile, "", window, cx);
+    }
+
+    fn tree_new_folder(
+        &mut self,
+        _: &NewFolderInTree,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_tree_name(TreePromptKind::NewFolder, "", window, cx);
+    }
+
+    fn tree_rename(&mut self, _: &RenameInTree, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((path, is_dir)) = self.file_tree.read(cx).single_selection() else {
+            return;
+        };
+        if is_dir && self.file_tree.read(cx).root() == Some(path.as_path()) {
+            // The root folder is not renamed from here, as in VS Code.
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.prompt_tree_name(TreePromptKind::Rename, &name, window, cx);
+    }
+
+    fn tree_delete(&mut self, _: &DeleteInTree, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree
+            .update(cx, |tree, cx| tree.delete_selection(window, cx));
+    }
+
+    fn tree_cut(&mut self, _: &CutInTree, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree.update(cx, |tree, cx| tree.cut_selection(cx));
+    }
+
+    fn tree_copy(&mut self, _: &CopyInTree, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree
+            .update(cx, |tree, cx| tree.copy_selection(cx));
+    }
+
+    fn tree_paste(&mut self, _: &PasteInTree, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree
+            .update(cx, |tree, cx| tree.paste_selection(window, cx));
+    }
+
+    fn tree_open(&mut self, _: &OpenInTree, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree
+            .update(cx, |tree, cx| tree.open_selection(cx));
+    }
+
+    fn tree_select_up(&mut self, _: &TreeSelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree
+            .update(cx, |tree, cx| tree.select_previous(cx));
+    }
+
+    fn tree_select_down(&mut self, _: &TreeSelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree.update(cx, |tree, cx| tree.select_next(cx));
+    }
+
+    fn tree_select_left(&mut self, _: &TreeSelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree.update(cx, |tree, cx| tree.select_parent(cx));
+    }
+
+    fn tree_select_right(&mut self, _: &TreeSelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree.update(cx, |tree, cx| tree.select_child(cx));
+    }
+
+    fn tree_select_first(&mut self, _: &TreeSelectFirst, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree.update(cx, |tree, cx| tree.select_first(cx));
+    }
+
+    fn tree_select_last(&mut self, _: &TreeSelectLast, _: &mut Window, cx: &mut Context<Self>) {
+        self.file_tree.update(cx, |tree, cx| tree.select_last(cx));
+    }
+
+    /// Ask for a name in a one-line prompt, the way Go to Line asks for a
+    /// line: the palette's single row never filters, and its query is the
+    /// name. Confirming hands the text straight to `apply_tree_name`.
+    fn prompt_tree_name(
+        &mut self,
+        kind: TreePromptKind,
+        initial: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let (title, placeholder) = match kind {
+            TreePromptKind::NewFile => ("New file", "File name"),
+            TreePromptKind::NewFolder => ("New folder", "Folder name"),
+            TreePromptKind::Rename => ("Rename", "New name"),
+        };
+        self.tree_prompt
+            .update(cx, |state, cx| state.set_query(initial, window, cx));
+        let state = self.tree_prompt.clone();
+        let workspace = cx.weak_entity();
+        let title: SharedString = title.into();
+        let placeholder: SharedString = placeholder.into();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let focus = state.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+            let typed = state.clone();
+            let workspace = workspace.clone();
+            dialog.close_button(false).p_0().child(
+                Command::new(&state)
+                    .bordered(false)
+                    .filterable(false)
+                    .placeholder(placeholder.clone())
+                    .max_h(rems(24.))
+                    .item(CommandItem::new().label(title.clone()).keywords(["name"]))
+                    .on_confirm(move |_, window, cx| {
+                        window.close_dialog(cx);
+                        let name = typed.read(cx).query(cx).to_string();
+                        _ = workspace
+                            .update(cx, |this, cx| this.apply_tree_name(kind, name, window, cx));
+                    })
+                    .on_cancel(|window, cx| window.close_dialog(cx)),
+            )
+        });
+    }
+
+    /// Carry out the name a tree prompt collected.
+    fn apply_tree_name(
+        &mut self,
+        kind: TreePromptKind,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            TreePromptKind::NewFile | TreePromptKind::NewFolder => {
+                let Some(folder) = self.file_tree.read(cx).target_folder() else {
+                    window.push_notification(Notification::info("Open a folder first."), cx);
+                    return;
+                };
+                let is_dir = matches!(kind, TreePromptKind::NewFolder);
+                self.file_tree.update(cx, |tree, cx| {
+                    tree.create_entry(&folder, &name, is_dir, window, cx)
+                });
+            }
+            TreePromptKind::Rename => {
+                let Some((path, _)) = self.file_tree.read(cx).single_selection() else {
+                    return;
+                };
+                self.file_tree
+                    .update(cx, |tree, cx| tree.rename_entry(&path, &name, window, cx));
+            }
+        }
     }
 
     fn confirm_close_documents(
@@ -2137,20 +2483,48 @@ impl Workspace {
         self.command_palette
             .update(cx, |state, cx| state.set_query("", window, cx));
         let state = self.command_palette.clone();
+        // The palette lives in a dialog, and an action confirmed there is
+        // dispatched along the dialog's own focus path — which the window's
+        // workspace is not part of, so the widget's own dispatch never
+        // arrives. The rows therefore carry no action at all; confirming one
+        // hands the Action it stands for back to the workspace and dispatches
+        // it from there.
+        let ws_focus = self.focus_handle.clone();
         window.open_dialog(cx, move |dialog, window, cx| {
             let focus = state.read(cx).focus_handle(cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));
-            let command = commands::groups().into_iter().fold(
+            let specs = commands::groups();
+            let rows = commands::palette(&specs);
+            let actions = commands::actions(&specs);
+            let command = rows.into_iter().fold(
                 Command::new(&state)
                     .bordered(false)
                     .placeholder("Type a command")
                     .max_h(rems(24.)),
                 |command, group| command.group(group),
             );
+            let ws_focus = ws_focus.clone();
             dialog.close_button(false).p_0().child(
                 command
                     .empty(|_, _, _| "No matching commands")
-                    .on_confirm(|_, window, cx| window.close_dialog(cx))
+                    .on_confirm(move |index: IndexPath, window, cx| {
+                        window.close_dialog(cx);
+                        let Some(action) = actions
+                            .get(index.section)
+                            .and_then(|group| group.get(index.row))
+                            .map(|action| action.boxed_clone())
+                        else {
+                            return;
+                        };
+                        let ws_focus = ws_focus.clone();
+                        window.defer(cx, move |window, cx| {
+                            // Put the window back on its own focus path
+                            // before dispatching, so the action reaches the
+                            // workspace that handles it.
+                            ws_focus.focus(window, cx);
+                            window.dispatch_action(action, cx);
+                        });
+                    })
                     .on_cancel(|window, cx| window.close_dialog(cx)),
             )
         });
@@ -2440,6 +2814,7 @@ impl Workspace {
                         // clicked replaces it until it is edited or opened
                         // for good, the way VS Code marks its preview.
                         let is_preview = self.preview == Some(doc_id);
+                        let is_pinned = self.pinned.contains(&doc_id);
                         let is_last = ix + 1 >= count;
                         let has_other = count > 1;
                         let name = doc.name().to_string();
@@ -2522,24 +2897,41 @@ impl Workspace {
                                     .justify_center()
                                     .rounded_sm()
                                     .hover(|style| style.bg(theme.list_active))
-                                    .child(div().when(dirty, |this| {
+                                    // A pinned tab shows a pin where the
+                                    // close box would be, and the pin is
+                                    // what takes the click — the way VS
+                                    // Code's pinned tabs read.
+                                    .when(is_pinned, |this| {
                                         this.child(
-                                            div().size(px(7.)).rounded_full().bg(theme.primary),
+                                            Icon::new(IconName::Pin)
+                                                .xsmall()
+                                                .text_color(theme.muted_foreground),
                                         )
-                                        .group_hover("tab", |style| style.invisible())
-                                    }))
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .invisible()
-                                            .when(active && !dirty, |this| this.visible())
-                                            .group_hover("tab", |style| style.visible())
-                                            .child(Icon::new(IconName::Close).xsmall()),
-                                    )
+                                    })
+                                    .when(!is_pinned, |this| {
+                                        this.child(div().when(dirty, |this| {
+                                            this.child(
+                                                div().size(px(7.)).rounded_full().bg(theme.primary),
+                                            )
+                                            .group_hover("tab", |style| style.invisible())
+                                        }))
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .invisible()
+                                                .when(active && !dirty, |this| this.visible())
+                                                .group_hover("tab", |style| style.visible())
+                                                .child(Icon::new(IconName::Close).xsmall()),
+                                        )
+                                    })
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, _, window, cx| {
                                             cx.stop_propagation();
+                                            if is_pinned {
+                                                this.toggle_pin_by_id(doc_id, cx);
+                                                return;
+                                            }
                                             let doc = this.documents[ix].clone();
                                             let id = doc.entity_id();
                                             this.confirm_unsaved(
@@ -2618,9 +3010,18 @@ impl Workspace {
                                     let ws_close = ws.clone();
                                     let ws_other = ws.clone();
                                     let ws_right = ws.clone();
+                                    let ws_pin = ws.clone();
                                     let doc = doc_weak.clone();
 
-                                    menu.item(PopupMenuItem::new("Close").on_click(
+                                    menu.item(
+                                        PopupMenuItem::new(if is_pinned { "Unpin" } else { "Pin" })
+                                            .on_click(move |_, _, cx| {
+                                                _ = ws_pin.update(cx, |this, cx| {
+                                                    this.toggle_pin_by_id(doc_id, cx);
+                                                });
+                                            }),
+                                    )
+                                    .item(PopupMenuItem::new("Close").on_click(
                                         move |_, window, cx| {
                                             _ = ws_close.update(cx, |this, cx| {
                                                 let id = doc.entity_id();
@@ -3409,8 +3810,28 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::copy_rich_text))
             .on_action(cx.listener(Self::reveal_in_folder))
             .on_action(cx.listener(Self::close_document))
+            .on_action(cx.listener(Self::close_all_tabs))
+            .on_action(cx.listener(Self::reopen_closed_editor))
+            .on_action(cx.listener(Self::pin_tab))
+            .on_action(cx.listener(Self::go_back))
+            .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::close_other_tabs))
             .on_action(cx.listener(Self::close_tabs_to_the_right))
+            .on_action(cx.listener(Self::tree_new_file))
+            .on_action(cx.listener(Self::focus_explorer))
+            .on_action(cx.listener(Self::tree_new_folder))
+            .on_action(cx.listener(Self::tree_rename))
+            .on_action(cx.listener(Self::tree_delete))
+            .on_action(cx.listener(Self::tree_cut))
+            .on_action(cx.listener(Self::tree_copy))
+            .on_action(cx.listener(Self::tree_paste))
+            .on_action(cx.listener(Self::tree_open))
+            .on_action(cx.listener(Self::tree_select_up))
+            .on_action(cx.listener(Self::tree_select_down))
+            .on_action(cx.listener(Self::tree_select_left))
+            .on_action(cx.listener(Self::tree_select_right))
+            .on_action(cx.listener(Self::tree_select_first))
+            .on_action(cx.listener(Self::tree_select_last))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::set_layout))

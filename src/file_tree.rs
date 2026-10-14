@@ -14,10 +14,10 @@ use std::{
 };
 
 use gpui_kit::{
-    AppContext as _, Context, DragMoveEvent, EventEmitter, ExternalPaths, FontWeight,
-    InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    UniformListScrollHandle, Window,
+    AppContext as _, Context, DragMoveEvent, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    FontWeight, InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Task, UniformListScrollHandle, Window,
     assets::IconName,
     component::{
         ActiveTheme as _, Icon, Sizable as _, WindowExt as _,
@@ -25,6 +25,9 @@ use gpui_kit::{
         checkbox::Checkbox,
         dialog::DialogFooter,
         h_flex,
+        menu::ContextMenuExt as _,
+        menu::PopupMenuItem,
+        notification::Notification,
         scroll::ScrollableElement as _,
         v_flex,
     },
@@ -35,7 +38,7 @@ use gpui_kit::{
 
 use crate::workspace::DragGhost;
 
-use crate::actions::OpenFolder;
+use crate::actions::{FILE_TREE_CONTEXT, OpenFolder};
 use crate::file_icon::file_icon;
 
 /// Entries hidden by default, matching VS Code's `files.exclude`.
@@ -62,6 +65,17 @@ pub enum FileTreeEvent {
     Copied { copied: usize, failed: usize },
     /// An entry (and everything below it) was moved within the tree.
     Moved { from: PathBuf, to: PathBuf },
+    /// Entries were deleted from disk (and everything below them).
+    Deleted { paths: Vec<PathBuf> },
+}
+
+/// Files or folders cut or copied in the tree, waiting for a paste. `cut`
+/// remembers which of the two Ctrl+X and Ctrl+C was, so paste moves or
+/// copies the way the key that started it says.
+#[derive(Clone)]
+struct TreeClipboard {
+    paths: Vec<PathBuf>,
+    cut: bool,
 }
 
 /// Files or folders being dragged inside the tree, to move (or, with the
@@ -148,6 +162,14 @@ pub struct FileTree {
     selected: BTreeSet<PathBuf>,
     /// Where Shift-extends starts from.
     anchor: Option<PathBuf>,
+    /// The keyboard, so Del, F2, Ctrl+X/C/V and the arrow keys reach the
+    /// tree only while it is the focused side of the window.
+    focus_handle: FocusHandle,
+    /// Entries cut or copied here, waiting for a paste.
+    clipboard: Option<TreeClipboard>,
+    /// A path to select once the next listing lands, so a file just created
+    /// or renamed ends up picked and on screen.
+    pending_reveal: Option<PathBuf>,
     /// Whether dotfiles and the default-excluded entries are listed.
     show_hidden: bool,
     /// Shared with the drag-over styles, which run without access to the
@@ -168,6 +190,12 @@ pub struct FileTree {
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
 
+impl Focusable for FileTree {
+    fn focus_handle(&self, _: &gpui_kit::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl FileTree {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let this = Self {
@@ -178,6 +206,9 @@ impl FileTree {
             active: None,
             selected: BTreeSet::new(),
             anchor: None,
+            focus_handle: cx.focus_handle(),
+            clipboard: None,
+            pending_reveal: None,
             show_hidden: crate::themes::AppSettings::get(cx).show_hidden_entries,
             drag_copy: Rc::new(Cell::new(false)),
             hover_expand: None,
@@ -281,6 +312,11 @@ impl FileTree {
                     this.listings = listings;
                     this.rebuild_rows();
                     this.scroll_to_active();
+                    if let Some(path) = this.pending_reveal.take() {
+                        this.selected = std::iter::once(path.clone()).collect();
+                        this.anchor = Some(path.clone());
+                        this.scroll_to_path(&path);
+                    }
                     cx.notify();
                 }
             });
@@ -315,6 +351,412 @@ impl FileTree {
             self.scroll
                 .scroll_to_item(ix, gpui_kit::ScrollStrategy::Nearest);
         }
+    }
+
+    /// Put `path` on screen, if the tree has a row for it.
+    fn scroll_to_path(&self, path: &Path) {
+        if let Some(ix) = self.rows.iter().position(|row| row.entry.path == path) {
+            self.scroll
+                .scroll_to_item(ix, gpui_kit::ScrollStrategy::Nearest);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Selection and the keyboard
+
+    /// The row index the selection starts at, if anything is picked.
+    fn anchor_row(&self) -> Option<usize> {
+        let anchor = self
+            .anchor
+            .clone()
+            .or_else(|| self.selected.iter().next().cloned())?;
+        self.rows.iter().position(|row| row.entry.path == anchor)
+    }
+
+    /// Pick one row, the way a single click does, and scroll it into view.
+    fn select_row(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(ix) else {
+            return;
+        };
+        let path = row.entry.path.clone();
+        self.selected.clear();
+        self.selected.insert(path.clone());
+        self.anchor = Some(path.clone());
+        self.scroll_to_path(&path);
+        cx.notify();
+    }
+
+    /// The entries currently picked, in row order.
+    pub fn selection(&self) -> Vec<PathBuf> {
+        self.selected.iter().cloned().collect()
+    }
+
+    /// The one entry picked, with whether it is a folder, when exactly one is.
+    pub fn single_selection(&self) -> Option<(PathBuf, bool)> {
+        if self.selected.len() != 1 {
+            return None;
+        }
+        let path = self.selected.iter().next()?.clone();
+        let is_dir = self
+            .rows
+            .iter()
+            .find(|row| row.entry.path == path)
+            .map(|row| row.entry.is_dir)
+            .unwrap_or_else(|| path.is_dir());
+        Some((path, is_dir))
+    }
+
+    /// Where a new file or folder, or a paste, belongs: inside the picked
+    /// folder, beside the picked file, or at the root when nothing is picked
+    /// — the same choice VS Code's Explorer makes.
+    pub fn target_folder(&self) -> Option<PathBuf> {
+        let anchor = self
+            .selected
+            .iter()
+            .next()
+            .cloned()
+            .or_else(|| self.active.clone());
+        match anchor {
+            Some(path) if path.is_dir() => Some(path),
+            Some(path) => path.parent().map(Path::to_path_buf),
+            None => self.root.clone(),
+        }
+    }
+
+    /// Pick the file the workspace is showing, so focusing the Explorer
+    /// lands on it, the way VS Code's Ctrl+Shift+E does.
+    pub fn select_active(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active.clone() else {
+            return;
+        };
+        if let Some(ix) = self.rows.iter().position(|row| row.entry.path == active) {
+            self.select_row(ix, cx);
+        }
+    }
+
+    pub fn has_clipboard(&self) -> bool {
+        self.clipboard.is_some()
+    }
+
+    /// Move the selection one row down, as Down does in VS Code's Explorer.
+    pub fn select_next(&mut self, cx: &mut Context<Self>) {
+        let next = match self.anchor_row() {
+            Some(ix) => (ix + 1).min(self.rows.len().saturating_sub(1)),
+            None => 0,
+        };
+        if !self.rows.is_empty() {
+            self.select_row(next, cx);
+        }
+    }
+
+    /// Move the selection one row up.
+    pub fn select_previous(&mut self, cx: &mut Context<Self>) {
+        let previous = self
+            .anchor_row()
+            .map(|ix| ix.saturating_sub(1))
+            .unwrap_or(0);
+        if !self.rows.is_empty() {
+            self.select_row(previous, cx);
+        }
+    }
+
+    pub fn select_first(&mut self, cx: &mut Context<Self>) {
+        if !self.rows.is_empty() {
+            self.select_row(0, cx);
+        }
+    }
+
+    pub fn select_last(&mut self, cx: &mut Context<Self>) {
+        if !self.rows.is_empty() {
+            self.select_row(self.rows.len() - 1, cx);
+        }
+    }
+
+    /// Left: close an open folder, or step up to the folder that holds the
+    /// entry, as VS Code's Explorer does.
+    pub fn select_parent(&mut self, cx: &mut Context<Self>) {
+        let Some(ix) = self.anchor_row() else {
+            return;
+        };
+        let row = &self.rows[ix];
+        let (path, is_dir, expanded) = (
+            row.entry.path.clone(),
+            row.entry.is_dir,
+            self.expanded.contains(&row.entry.path),
+        );
+        if is_dir && expanded {
+            self.toggle(path, cx);
+            return;
+        }
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if let Some(parent_ix) = self.rows.iter().position(|row| row.entry.path == parent) {
+            self.select_row(parent_ix, cx);
+        }
+    }
+
+    /// Right: open a closed folder, or step into the one already open.
+    pub fn select_child(&mut self, cx: &mut Context<Self>) {
+        let Some(ix) = self.anchor_row() else {
+            return;
+        };
+        let row = &self.rows[ix];
+        if !row.entry.is_dir {
+            return;
+        }
+        let path = row.entry.path.clone();
+        if !self.expanded.contains(&path) {
+            self.toggle(path, cx);
+            return;
+        }
+        // The first row below it that is nested one level deeper is its
+        // first child.
+        let depth = row.depth;
+        if self
+            .rows
+            .get(ix + 1)
+            .is_some_and(|next| next.depth == depth + 1)
+        {
+            self.select_row(ix + 1, cx);
+        }
+    }
+
+    /// Enter on a file opens it (keeping it, like a double click); on a
+    /// folder, it opens or closes it.
+    pub fn open_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(ix) = self.anchor_row() else {
+            return;
+        };
+        let row = &self.rows[ix];
+        let (path, is_dir) = (row.entry.path.clone(), row.entry.is_dir);
+        if is_dir {
+            self.toggle(path, cx);
+        } else {
+            cx.emit(FileTreeEvent::Open {
+                path,
+                preview: false,
+            });
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Editing files from the tree
+
+    /// Create `name` inside `dir` (a file, or a folder when `is_dir`), then
+    /// pick it. Nested names like `notes/plan.md` create the folders on the
+    /// way, as VS Code's Explorer does.
+    pub fn create_entry(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(relative) = sanitize_name(name) else {
+            window.push_notification(Notification::info("That name isn’t usable."), cx);
+            return;
+        };
+        let target = dir.join(&relative);
+        if target.exists() {
+            window.push_notification(Notification::info(format!("“{name}” already exists.")), cx);
+            return;
+        }
+        let created = if is_dir {
+            std::fs::create_dir_all(&target)
+        } else {
+            target
+                .parent()
+                .map(std::fs::create_dir_all)
+                .transpose()
+                .and_then(|_| std::fs::write(&target, ""))
+        };
+        match created {
+            Ok(()) => {
+                // The folder that gained the entry has to be open for its row
+                // to exist.
+                self.expanded.insert(dir.to_path_buf());
+                self.pending_reveal = Some(target.clone());
+                self.refresh(cx);
+                if !is_dir {
+                    cx.emit(FileTreeEvent::Open {
+                        path: target,
+                        preview: false,
+                    });
+                }
+            }
+            Err(err) => window.push_notification(
+                Notification::info(format!("Couldn’t create “{name}”: {err}")),
+                cx,
+            ),
+        }
+    }
+
+    /// Rename `path` to `new_name`, keeping it in its folder. Open documents
+    /// follow, because the workspace hears [`FileTreeEvent::Moved`].
+    pub fn rename_entry(
+        &mut self,
+        path: &Path,
+        new_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = sanitize_entry_name(new_name) else {
+            window.push_notification(Notification::info("That name isn’t usable."), cx);
+            return;
+        };
+        if path.file_name().and_then(|name| name.to_str()) == Some(name.as_str()) {
+            return;
+        }
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let target = parent.join(&name);
+        if target.exists() {
+            window.push_notification(Notification::info(format!("“{name}” already exists.")), cx);
+            return;
+        }
+        match move_path(path, &target) {
+            Ok(()) => {
+                self.pending_reveal = Some(target.clone());
+                self.refresh(cx);
+                cx.emit(FileTreeEvent::Moved {
+                    from: path.to_path_buf(),
+                    to: target,
+                });
+            }
+            Err(err) => {
+                window.push_notification(Notification::info(format!("Couldn’t rename: {err}")), cx)
+            }
+        }
+    }
+
+    /// Ask before deleting the picked entries, then remove them from disk.
+    pub fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = top_level(&self.selection());
+        if paths.is_empty() || window.has_active_dialog(cx) {
+            return;
+        }
+        let title = match paths.len() {
+            1 => format!("Delete “{}”?", display_name(&paths[0])),
+            count => format!("Delete {count} items?"),
+        };
+        let tree = cx.weak_entity();
+        let targets = paths.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (tree_delete, delete_targets) = (tree.clone(), targets.clone());
+            alert
+                .title(title.clone())
+                .description("They are removed from disk and can’t be recovered.")
+                .footer(
+                    DialogFooter::new()
+                        .justify_end()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .outline()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("delete").label("Delete").primary().on_click(
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                _ = tree_delete.update(cx, |tree, cx| {
+                                    tree.apply_delete(delete_targets.clone(), cx)
+                                });
+                            },
+                        )),
+                )
+        });
+    }
+
+    fn apply_delete(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let mut deleted = Vec::new();
+        for path in paths {
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if removed.is_ok() {
+                self.selected.remove(&path);
+                if self.anchor.as_deref() == Some(path.as_path()) {
+                    self.anchor = None;
+                }
+                deleted.push(path);
+            }
+        }
+        if !deleted.is_empty() {
+            self.refresh(cx);
+            cx.emit(FileTreeEvent::Deleted { paths: deleted });
+        }
+        cx.notify();
+    }
+
+    /// Remember the picked entries for a paste, as a cut (Ctrl+X) moves them.
+    pub fn cut_selection(&mut self, cx: &mut Context<Self>) {
+        let paths = self.selection();
+        if paths.is_empty() {
+            return;
+        }
+        self.clipboard = Some(TreeClipboard { paths, cut: true });
+        cx.notify();
+    }
+
+    /// Remember the picked entries for a paste, as a copy (Ctrl+C).
+    pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        let paths = self.selection();
+        if paths.is_empty() {
+            return;
+        }
+        self.clipboard = Some(TreeClipboard { paths, cut: false });
+        cx.notify();
+    }
+
+    /// Land the clipboard in the target folder: move what was cut, copy what
+    /// was copied, the way VS Code's Explorer paste does.
+    pub fn paste_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = self.clipboard.clone() else {
+            return;
+        };
+        let Some(target) = self.target_folder() else {
+            return;
+        };
+        let sources = top_level(&clipboard.paths);
+        if clipboard.cut {
+            for source in sources {
+                let Some(name) = source.file_name() else {
+                    continue;
+                };
+                let dest = target.join(name);
+                if source == dest || source.parent() == Some(target.as_path()) {
+                    continue;
+                }
+                if source.is_dir() && target.starts_with(&source) {
+                    continue;
+                }
+                match move_path(&source, &dest) {
+                    Ok(()) => cx.emit(FileTreeEvent::Moved {
+                        from: source,
+                        to: dest,
+                    }),
+                    Err(err) => window
+                        .push_notification(Notification::info(format!("Couldn’t move: {err}")), cx),
+                }
+            }
+            self.clipboard = None;
+        } else {
+            let (mut copied, mut failed) = (0usize, 0usize);
+            for source in sources {
+                match copy_entry(&source, &target) {
+                    Ok(()) => copied += 1,
+                    Err(_) => failed += 1,
+                }
+            }
+            cx.emit(FileTreeEvent::Copied { copied, failed });
+        }
+        self.refresh(cx);
+        cx.notify();
     }
 
     fn toggle(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -722,6 +1164,12 @@ impl FileTree {
                 let is_selected = self.selected.contains(&path);
                 let click_path = entry.path.clone();
                 let click_is_dir = entry.is_dir;
+                let right_path = entry.path.clone();
+                // The Explorer's menu acts on what is picked; the root is
+                // never renamed or deleted.
+                let at_root = self.root.as_deref() == Some(entry.path.as_path());
+                let can_paste = self.has_clipboard();
+                let menu_focus = self.focus_handle.clone();
                 Some(
                     h_flex()
                         .id(ix)
@@ -788,13 +1236,14 @@ impl FileTree {
                         )
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                 // Shift extends the selection and the
                                 // secondary key (Ctrl on Windows and Linux,
                                 // Command on macOS) toggles one entry; a
                                 // plain click selects one. Opening waits for
                                 // the release, so a press that turns into a
                                 // drag never opens the file it moves.
+                                this.focus_handle.focus(window, cx);
                                 if event.modifiers.shift {
                                     this.select_range(&path, cx);
                                 } else if event.modifiers.secondary() {
@@ -802,6 +1251,15 @@ impl FileTree {
                                 } else {
                                     this.select_only(&path, cx);
                                 }
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _, window, cx| {
+                                // A right click picks the row before the menu
+                                // opens, the way VS Code's Explorer does.
+                                this.focus_handle.focus(window, cx);
+                                this.select_only(&right_path, cx);
                             }),
                         )
                         .on_mouse_up(
@@ -897,6 +1355,46 @@ impl FileTree {
                                 },
                             )
                         })
+                        // The Explorer's right-click menu: the same commands
+                        // the keyboard has, acting on the picked entries. The
+                        // menu hands focus back to the tree before it
+                        // dispatches, so the workspace hears the action.
+                        .context_menu(move |menu, _, _| {
+                            menu.action_context(menu_focus.clone())
+                                .item(
+                                    PopupMenuItem::new("New File…")
+                                        .action(Box::new(crate::actions::NewFileInTree)),
+                                )
+                                .item(
+                                    PopupMenuItem::new("New Folder…")
+                                        .action(Box::new(crate::actions::NewFolderInTree)),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("Rename…")
+                                        .disabled(at_root)
+                                        .action(Box::new(crate::actions::RenameInTree)),
+                                )
+                                .item(
+                                    PopupMenuItem::new("Delete")
+                                        .disabled(at_root)
+                                        .action(Box::new(crate::actions::DeleteInTree)),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("Cut")
+                                        .action(Box::new(crate::actions::CutInTree)),
+                                )
+                                .item(
+                                    PopupMenuItem::new("Copy")
+                                        .action(Box::new(crate::actions::CopyInTree)),
+                                )
+                                .item(
+                                    PopupMenuItem::new("Paste")
+                                        .disabled(!can_paste)
+                                        .action(Box::new(crate::actions::PasteInTree)),
+                                )
+                        })
                         .into_any_element(),
                 )
             })
@@ -927,6 +1425,27 @@ impl Render for FileTree {
             .child(
                 h_flex()
                     .items_center()
+                    .child(
+                        Button::new("new-file")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::FilePlus))
+                            .tooltip("New file")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::NewFileInTree), cx)
+                            }),
+                    )
+                    .child(
+                        Button::new("new-folder")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::FolderPlus))
+                            .tooltip("New folder")
+                            .on_click(|_, window, cx| {
+                                window
+                                    .dispatch_action(Box::new(crate::actions::NewFolderInTree), cx)
+                            }),
+                    )
                     .child(
                         Button::new("refresh-folders")
                             .ghost()
@@ -999,6 +1518,8 @@ impl Render for FileTree {
 
         v_flex()
             .id("file-tree")
+            .key_context(FILE_TREE_CONTEXT)
+            .track_focus(&self.focus_handle)
             .size_full()
             .bg(theme.sidebar)
             .on_drop(
@@ -1053,6 +1574,30 @@ fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// The name typed into New File / New Folder, as a path relative to the
+/// folder it goes in. `None` for anything empty, absolute or stepping up a
+/// level; a nested name like `notes/plan.md` is allowed and keeps its shape.
+fn sanitize_name(name: &str) -> Option<PathBuf> {
+    let trimmed = name.trim().trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    let usable = !path.is_absolute()
+        && path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)));
+    usable.then(|| path.to_path_buf())
+}
+
+/// The name typed into Rename: one entry, no folders and no stepping up.
+fn sanitize_entry_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    let usable =
+        !trimmed.is_empty() && trimmed != "." && trimmed != ".." && !trimmed.contains(['/', '\\']);
+    usable.then(|| trimmed.to_string())
 }
 
 /// Move `source` to `dest`, falling back to copy + delete when the rename
@@ -1140,6 +1685,32 @@ fn list(folder: &Path, show_hidden: bool) -> Option<Vec<Entry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_name_is_kept_inside_the_folder_it_goes_in() {
+        // A plain name, and a nested one the way VS Code's Explorer accepts.
+        assert_eq!(sanitize_name("plan.md"), Some(PathBuf::from("plan.md")));
+        assert_eq!(
+            sanitize_name(" notes/plan.md "),
+            Some(PathBuf::from("notes/plan.md"))
+        );
+        // Nothing, an absolute path and a step upwards are all refused.
+        assert_eq!(sanitize_name(""), None);
+        assert_eq!(sanitize_name("   "), None);
+        assert_eq!(sanitize_name("/etc/passwd"), None);
+        assert_eq!(sanitize_name("../escape.md"), None);
+    }
+
+    #[test]
+    fn a_rename_is_one_entry_and_nothing_else() {
+        assert_eq!(sanitize_entry_name("plan.md").as_deref(), Some("plan.md"));
+        assert_eq!(sanitize_entry_name(" notes ").as_deref(), Some("notes"));
+        assert_eq!(sanitize_entry_name(".."), None);
+        assert_eq!(sanitize_entry_name("."), None);
+        // A rename never moves the entry, so a path is not a name.
+        assert_eq!(sanitize_entry_name("a/b.md"), None);
+        assert_eq!(sanitize_entry_name(""), None);
+    }
 
     #[test]
     fn lists_folders_first_and_everything_else() {

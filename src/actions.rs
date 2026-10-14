@@ -24,11 +24,16 @@ actions!(
         ExportDocx,
         RevealInFolder,
         CloseDocument,
+        CloseAllTabs,
         CloseOtherTabs,
         CloseTabsToTheRight,
         CloseWindow,
+        ReopenClosedEditor,
+        PinTab,
         NextTab,
         PreviousTab,
+        GoBack,
+        GoForward,
         Quit,
         About,
         OpenMarkdownGuide,
@@ -52,6 +57,21 @@ actions!(
         GoToLine,
         CommandPalette,
         QuickOpen,
+        NewFileInTree,
+        NewFolderInTree,
+        RenameInTree,
+        DeleteInTree,
+        CutInTree,
+        CopyInTree,
+        PasteInTree,
+        OpenInTree,
+        FocusExplorer,
+        TreeSelectUp,
+        TreeSelectDown,
+        TreeSelectLeft,
+        TreeSelectRight,
+        TreeSelectFirst,
+        TreeSelectLast,
         Bold,
         Italic,
         Strikethrough,
@@ -149,6 +169,11 @@ pub const WORKSPACE_CONTEXT: &str = "Workspace";
 /// shortcut can mean one thing in the editor and another in the workspace —
 /// the way VS Code scopes editor actions to the editor.
 pub const EDITOR_CONTEXT: &str = "Editor";
+/// The key context of the file sidebar's tree. File operations bind here so
+/// that Del, F2, Ctrl+X/C/V and the arrow keys mean what they mean in VS
+/// Code's Explorer only while the tree has the keyboard — inside the editor
+/// they keep deleting text, moving the caret and cutting the selection.
+pub const FILE_TREE_CONTEXT: &str = "FileTree";
 
 pub fn bind_keys(cx: &mut App) {
     let workspace = Some(WORKSPACE_CONTEXT);
@@ -174,6 +199,13 @@ pub fn bind_keys(cx: &mut App) {
         // free for it.
         KeyBinding::new("secondary-w", CloseDocument, workspace),
         KeyBinding::new("secondary-alt-w", CloseOtherTabs, workspace),
+        // VS Code's Close All Editors and Reopen Closed Editor.
+        KeyBinding::new("secondary-k secondary-w", CloseAllTabs, workspace),
+        KeyBinding::new("secondary-shift-t", ReopenClosedEditor, workspace),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-left", GoBack, workspace),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-right", GoForward, workspace),
         KeyBinding::new("secondary-shift-w", CloseWindow, workspace),
         KeyBinding::new("ctrl-tab", NextTab, workspace),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, workspace),
@@ -189,6 +221,9 @@ pub fn bind_keys(cx: &mut App) {
         // while the editor has focus (see `EDITOR_CONTEXT` below), so the two
         // never fire together.
         KeyBinding::new("secondary-b", ToggleFileSidebar, workspace),
+        // VS Code's Explorer: show the sidebar if it is hidden, put the
+        // keyboard in the tree, and pick the file that is open.
+        KeyBinding::new("secondary-shift-e", FocusExplorer, workspace),
         KeyBinding::new("secondary-alt-o", ToggleOutline, workspace),
         // VS Code gives Ctrl+Shift+F to Find in Files; focus mode moves aside
         // so the key is free for it.
@@ -213,6 +248,23 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-p", QuickOpen, workspace),
         // VS Code's Toggle Word Wrap.
         KeyBinding::new("alt-z", ToggleSoftWrap, workspace),
+        // The Explorer's keys, scoped to the file tree: Del, F2 and
+        // Ctrl+X/C/V are what VS Code binds them to, and they only reach the
+        // tree while it has the keyboard — in the editor the same keys keep
+        // editing text.
+        KeyBinding::new("f2", RenameInTree, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("delete", DeleteInTree, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("backspace", DeleteInTree, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("secondary-x", CutInTree, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("secondary-c", CopyInTree, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("secondary-v", PasteInTree, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("enter", OpenInTree, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("up", TreeSelectUp, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("down", TreeSelectDown, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("left", TreeSelectLeft, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("right", TreeSelectRight, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("home", TreeSelectFirst, Some(FILE_TREE_CONTEXT)),
+        KeyBinding::new("end", TreeSelectLast, Some(FILE_TREE_CONTEXT)),
         // Typing commands, scoped to the editor so they mean nothing while the
         // sidebar has the keyboard.
         KeyBinding::new("secondary-b", Bold, Some(EDITOR_CONTEXT)),
