@@ -36,6 +36,7 @@ use gpui_kit::{
 use crate::workspace::DragGhost;
 
 use crate::actions::OpenFolder;
+use crate::file_icon::file_icon;
 
 /// Entries hidden by default, matching VS Code's `files.exclude`.
 pub(crate) const DEFAULT_EXCLUDED: &[&str] =
@@ -699,7 +700,8 @@ impl FileTree {
                 let icon = match (entry.is_dir, expanded) {
                     (true, true) => IconName::FolderOpen,
                     (true, false) => IconName::Folder,
-                    (false, _) => IconName::FileText,
+                    // Each file shows its type's icon, as in VS Code.
+                    (false, _) => file_icon(&entry.path),
                 };
                 let path = entry.path.clone();
                 let drop_path = entry.path.clone();
@@ -926,10 +928,18 @@ impl Render for FileTree {
                 h_flex()
                     .items_center()
                     .child(
+                        Button::new("refresh-folders")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::RefreshCw))
+                            .tooltip("Refresh")
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    )
+                    .child(
                         Button::new("collapse-folders")
                             .ghost()
                             .xsmall()
-                            .icon(Icon::new(IconName::FolderClosed))
+                            .icon(Icon::new(IconName::ChevronsDownUp))
                             .tooltip("Collapse folders")
                             .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
                     )

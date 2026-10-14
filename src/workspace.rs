@@ -45,10 +45,11 @@ use gpui_kit::{
 use crate::{
     actions::*,
     analysis::{Analysis, content_hash},
-    default_app, diagram_viewer,
+    commands, default_app, diagram_viewer,
     document::{self, LineEnding, display_name},
     document_view::{DocumentEvent, DocumentView},
     docx, export,
+    file_icon::file_icon,
     file_tree::{FileTree, FileTreeEvent, TreeDrag, invert_key_held},
     format,
     links::{self, LinkTarget},
@@ -193,6 +194,10 @@ pub struct Workspace {
     preview: Option<EntityId>,
     headings: Entity<CommandState>,
     quick_open: Entity<CommandState>,
+    /// The Show All Commands palette (Ctrl+Shift+P) and the Go to Line palette
+    /// (Ctrl+G). Each keeps its own query and focus across openings.
+    command_palette: Entity<CommandState>,
+    go_to_line: Entity<CommandState>,
     file_tree: Entity<FileTree>,
     app_menu_bar: Entity<AppMenuBar>,
 
@@ -230,6 +235,8 @@ impl Workspace {
         let settings = AppSettings::get(cx).clone();
         let headings = cx.new(|cx| CommandState::new(window, cx));
         let quick_open = cx.new(|cx| CommandState::new(window, cx));
+        let command_palette = cx.new(|cx| CommandState::new(window, cx));
+        let go_to_line = cx.new(|cx| CommandState::new(window, cx));
         let file_tree = cx.new(FileTree::new);
 
         let subscriptions = vec![
@@ -304,6 +311,8 @@ impl Workspace {
             preview: None,
             headings,
             quick_open,
+            command_palette,
+            go_to_line,
             file_tree,
             app_menu_bar,
             window_title: String::new(),
@@ -2077,11 +2086,7 @@ impl Workspace {
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_default()
                     .into();
-                let icon = if document::is_markdown_path(path) {
-                    IconName::FileText
-                } else {
-                    IconName::File
-                };
+                let icon = file_icon(path);
                 CommandItem::new()
                     .label(shown.clone())
                     .keywords([shown, name])
@@ -2115,6 +2120,91 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.open_paths(vec![action.0.clone()], Placement::Default, window, cx);
+    }
+
+    /// Show every command in one searchable list, the way VS Code's Show All
+    /// Commands (Ctrl+Shift+P) does. Each row carries the command's current
+    /// key binding, and confirming one dispatches its Action.
+    fn show_command_palette(
+        &mut self,
+        _: &CommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        self.command_palette
+            .update(cx, |state, cx| state.set_query("", window, cx));
+        let state = self.command_palette.clone();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let focus = state.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+            let command = commands::groups().into_iter().fold(
+                Command::new(&state)
+                    .bordered(false)
+                    .placeholder("Type a command")
+                    .max_h(rems(24.)),
+                |command, group| command.group(group),
+            );
+            dialog.close_button(false).p_0().child(
+                command
+                    .empty(|_, _, _| "No matching commands")
+                    .on_confirm(|_, window, cx| window.close_dialog(cx))
+                    .on_cancel(|window, cx| window.close_dialog(cx)),
+            )
+        });
+    }
+
+    /// Ask for a line number and move the caret there, the way VS Code's Go to
+    /// Line (Ctrl+G) does. The palette's query is the number; the single row
+    /// stays put so confirming always reads what was typed.
+    fn show_go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        self.go_to_line
+            .update(cx, |state, cx| state.set_query("", window, cx));
+        let state = self.go_to_line.clone();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let focus = state.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+            let typed = state.clone();
+            dialog.close_button(false).p_0().child(
+                Command::new(&state)
+                    .bordered(false)
+                    .filterable(false)
+                    .placeholder("Line number")
+                    .max_h(rems(24.))
+                    .item(
+                        CommandItem::new()
+                            .label("Go to line")
+                            .keywords(["go", "line"]),
+                    )
+                    .on_confirm(move |_, window, cx| {
+                        window.close_dialog(cx);
+                        let line = typed
+                            .read(cx)
+                            .query(cx)
+                            .trim()
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|line| *line > 0);
+                        if let Some(line) = line {
+                            window.dispatch_action(Box::new(GoToLineAt(line)), cx);
+                        }
+                    })
+                    .on_cancel(|window, cx| window.close_dialog(cx)),
+            )
+        });
+    }
+
+    /// Move the active document's caret to a line asked for by Go to Line.
+    fn go_to_line_at(&mut self, action: &GoToLineAt, window: &mut Window, cx: &mut Context<Self>) {
+        let line = action.0;
+        self.with_active(window, cx, |doc, window, cx| {
+            doc.go_to_line(line, window, cx)
+        });
     }
 
     fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -2353,6 +2443,8 @@ impl Workspace {
                         let is_last = ix + 1 >= count;
                         let has_other = count > 1;
                         let name = doc.name().to_string();
+                        // The tab carries its file's type icon, as in VS Code.
+                        let tab_icon = doc.path().map(|path| file_icon(path));
                         let theme = cx.theme();
                         let doc_weak = doc_entity.clone();
                         let ws_menu = workspace.clone();
@@ -2411,7 +2503,9 @@ impl Workspace {
                                     } else {
                                         theme.muted_foreground
                                     })
-                                    .child(Icon::new(IconName::FileText).xsmall()),
+                                    .child(
+                                        Icon::new(tab_icon.unwrap_or(IconName::FileText)).xsmall(),
+                                    ),
                             )
                             .child(
                                 div()
@@ -3321,6 +3415,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::set_layout))
             .on_action(cx.listener(Self::go_to_heading))
+            .on_action(cx.listener(Self::show_command_palette))
+            .on_action(cx.listener(Self::show_go_to_line))
+            .on_action(cx.listener(Self::go_to_line_at))
             .on_action(cx.listener(Self::show_quick_open))
             .on_action(cx.listener(Self::open_quick_path))
             .on_action(cx.listener(Self::toggle_appearance))

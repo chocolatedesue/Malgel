@@ -97,7 +97,7 @@ Windows, the Malgel menu on macOS) or the View menu:
 
 - **Tabs.** Open documents side by side; Ctrl+Tab and Ctrl+Shift+Tab switch
   between them. Without tabs, opening a file replaces the current one.
-- **File sidebar** (Ctrl+Shift+B). A folder's Markdown and text files as a
+- **File sidebar** (Ctrl+B). A folder's Markdown and text files as a
   tree that follows changes on disk; File → Open folder… picks the folder.
 - **Outline** (Ctrl+Alt+O). The document's headings beside the editor, with
   the section you are in highlighted; click one to jump there.
@@ -105,7 +105,7 @@ Windows, the Malgel menu on macOS) or the View menu:
   and front matter are skipped); right-click one for suggestions or to add
   it to your dictionary. American English is built in; any installed
   Hunspell dictionary works too (see [Settings](#settings)).
-- **Focus mode** (Ctrl+Shift+F, Esc to leave). Only the text, larger and
+- **Focus mode** (Ctrl+Alt+F, Esc to leave). Only the text, larger and
   centered, with everything but the current paragraph faded.
 
 ![Tabs, file sidebar, outline and spell check on the dark theme](docs/screenshot-workspace.png)
@@ -189,26 +189,32 @@ see [docs/RELEASING.md](docs/RELEASING.md), which also covers code signing.
 
 ## Keyboard shortcuts
 
-Ctrl is ⌘ on macOS.
+Ctrl is ⌘ on macOS. The bindings follow VS Code's defaults; where Malgel has
+nothing to bind, the key is left free (Find in Files, Ctrl+Shift+F, for one).
 
 | Command | Shortcut |
 | --- | --- |
+| Show all commands… | Ctrl+Shift+P |
 | New, Open…, Save, Save as… | Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S |
-| Export as HTML… | Ctrl+Shift+E |
+| Open folder… | Ctrl+K Ctrl+O |
 | Copy as rich text | Ctrl+Alt+C |
 | Close (tab, or window without tabs), Close window, Quit | Ctrl+W, Ctrl+Shift+W, Ctrl+Q |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
-| File sidebar, Outline, Focus mode | Ctrl+Shift+B, Ctrl+Alt+O, Ctrl+Shift+F |
+| File sidebar, Outline, Focus mode | Ctrl+B, Ctrl+Alt+O, Ctrl+Alt+F |
 | Settings | Ctrl+, |
 | Editor / Editor and preview / Preview | Ctrl+1 / Ctrl+2 / Ctrl+3 |
+| Go to file…, Go to line… | Ctrl+P, Ctrl+G |
 | Go to heading… | Ctrl+Shift+O |
 | Find…, Replace… | Ctrl+F, Ctrl+H |
+| Toggle word wrap | Alt+Z |
 | Bold, Italic, Strikethrough | Ctrl+B, Ctrl+I, Ctrl+Shift+X |
 | Inline code, Link, Code block | Ctrl+E, Ctrl+K, Ctrl+Shift+C |
 | Heading 1–6 | Ctrl+Alt+1 … Ctrl+Alt+6 |
 | Quote, Bulleted, Numbered, Task list | Ctrl+Shift+., Ctrl+Shift+8, Ctrl+Shift+7, Ctrl+Shift+9 |
 | Zoom in / out / actual size | Ctrl+=, Ctrl+-, Ctrl+0 |
-| Switch light and dark | Ctrl+Shift+L |
+
+Ctrl+B toggles the sidebar from the workspace and bolds from inside the
+editor, as in VS Code; Export and the light/dark switch live in the menus.
 
 In lists and tables, Enter, Tab and Shift+Tab continue, nest and move
 between cells as described above; Shift+Enter always inserts a plain line
@@ -242,6 +248,8 @@ dictionaries and on macOS those in `~/Library/Spelling` are found too.
 | `src/document_view.rs` | One document: editor and preview, scroll sync, smart keys and paste, spelling, focus mode, recovery |
 | `src/smart_edit.rs` | List continuation and nesting, table navigation and tidying, paste as link — pure and tested |
 | `src/file_tree.rs` | The file sidebar |
+| `src/commands.rs` | The command palette's grouped command list |
+| `src/file_icon.rs` | The icon a file type draws with, in the tree, tabs and palette |
 | `src/spell.rs` | Spell checking of prose with Hunspell dictionaries |
 | `src/session.rs` | The last session and recovered unsaved changes |
 | `src/rich_copy.rs` | Copy as rich text |
