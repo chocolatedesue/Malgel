@@ -26,7 +26,19 @@ application that starts, paints and responds.
    came from, not on a changed frame.
 9. Moves that line down with `Alt+↓` and saves, checking the file's first two
    lines swapped.
-10. Checks the process is still alive at the end (no crash from any step).
+10. Opens the PDF fixture and switches the viewer's page thumbnails on and off
+   from its toolbar, checking the strip takes the width it should and gives it
+   back.
+11. Checks the process is still alive at the end (no crash from any step).
+
+A viewer has no text field for the keyboard to land in, so step 10 clicks the
+toolbar button rather than pressing a key — the one place in this script that
+does.
+
+The script kills the app and its X server on the way out, whatever happens. A
+run that stops early would otherwise leave Malgel alive, and a second launch
+hands its arguments to the running instance instead of opening a window, so
+every later run would drive the stale window.
 
 Screenshots land in `target/e2e-artifacts/` for eyeballing after a failure.
 

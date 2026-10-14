@@ -1045,6 +1045,14 @@ impl DocumentView {
             .update(cx, |editor, cx| editor.focus(window, cx));
     }
 
+    /// Show or hide the page thumbnails, when a PDF is open. Nothing happens
+    /// for any other kind of document.
+    pub fn toggle_pdf_thumbnails(&mut self, cx: &mut Context<Self>) {
+        if let Some(pdf) = &self.pdf {
+            pdf.update(cx, |pdf, cx| pdf.toggle_thumbnails(cx));
+        }
+    }
+
     /// Enter, Tab and Shift-Tab in the editor: continue lists, nest items,
     /// move between table cells. Returns whether the key was handled.
     fn smart_key(
