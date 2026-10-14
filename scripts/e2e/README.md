@@ -21,7 +21,10 @@ application that starts, paints and responds.
 7. Pins the tab in front from the palette, then runs Close All Editors
    (`Ctrl+K Ctrl+W`) and checks the editor pane is untouched — the pinned
    tab stayed.
-8. Checks the process is still alive at the end (no crash from any step).
+8. Searches the folder's files with `Ctrl+Shift+F`, takes the first hit, and
+   types into the file the hit opened — so the check is on the file the hit
+   came from, not on a changed frame.
+9. Checks the process is still alive at the end (no crash from any step).
 
 Screenshots land in `target/e2e-artifacts/` for eyeballing after a failure.
 
