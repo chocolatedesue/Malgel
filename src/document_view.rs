@@ -508,6 +508,25 @@ impl DocumentView {
         });
     }
 
+    /// Move the caret to the start of `line` (1-based), the way VS Code's Go
+    /// to Line (Ctrl+G) does. A line past the end lands on the last line, so
+    /// typing too large a number still moves the caret rather than doing
+    /// nothing.
+    pub fn go_to_line(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let source = self.source();
+        let len = source.len();
+        // Text is normalised to `\n` on load (see `document::load`), so a
+        // line's start is one byte past the newline that ends the one before.
+        let mut offset = 0;
+        for _ in 1..line.max(1) {
+            match source[offset..].find('\n') {
+                Some(newline) => offset += newline + 1,
+                None => break,
+            }
+        }
+        self.set_cursor(offset.min(len), window, cx);
+    }
+
     /// Replace the document with `text` read from `path`.
     fn load_text(
         &mut self,
@@ -1379,6 +1398,7 @@ impl DocumentView {
         let (menu_document, paste_document) = (document.clone(), document.clone());
         div()
             .id("editor-pane")
+            .key_context(crate::actions::EDITOR_CONTEXT)
             .size_full()
             .bg(cx.theme().background)
             .font_family(cx.theme().mono_font_family.clone())
