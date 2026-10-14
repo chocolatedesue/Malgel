@@ -94,15 +94,21 @@ pub fn build(cx: &App) -> Vec<Menu> {
         MenuItem::action("New", NewFile),
         MenuItem::action("Open…", Open),
         MenuItem::action("Open folder…", OpenFolder),
-        MenuItem::action("Quick open…", QuickOpen),
         submenu("Open recent", recent),
         MenuItem::separator(),
         MenuItem::action("Save", Save),
         MenuItem::action("Save as…", SaveAs),
         MenuItem::separator(),
-        MenuItem::action("Export as HTML…", ExportHtml),
-        MenuItem::action("Export as PDF…", ExportPdf),
-        MenuItem::action("Export as Word document…", ExportDocx),
+        // The three exports share one submenu so the File menu still reads in
+        // one screen, as VS Code's does.
+        submenu(
+            "Export",
+            vec![
+                MenuItem::action("Export as HTML…", ExportHtml),
+                MenuItem::action("Export as PDF…", ExportPdf),
+                MenuItem::action("Export as Word document…", ExportDocx),
+            ],
+        ),
         MenuItem::separator(),
         MenuItem::action(
             if macos {
@@ -114,15 +120,22 @@ pub fn build(cx: &App) -> Vec<Menu> {
         ),
         MenuItem::separator(),
         MenuItem::action("Close", CloseDocument),
-        MenuItem::action("Close other tabs", CloseOtherTabs),
-        MenuItem::action("Close tabs to the right", CloseTabsToTheRight),
+        // VS Code's File menu carries the close-all and the reopen; the
+        // per-tab closes live on a tab's own menu.
+        MenuItem::action("Close all editors", CloseAllTabs),
+        MenuItem::action("Reopen closed editor", ReopenClosedEditor),
         MenuItem::action("Close window", CloseWindow),
     ];
     if !macos {
+        // On Windows and Linux, VS Code keeps Settings under File ▸
+        // Preferences; macOS keeps it in the application menu (above).
+        file.push(MenuItem::separator());
+        file.push(MenuItem::action("Settings…", OpenSettings));
+        file.push(MenuItem::separator());
         file.push(MenuItem::action("Quit", Quit));
     }
 
-    let mut edit = vec![
+    let edit = vec![
         MenuItem::action("Undo", Undo),
         MenuItem::action("Redo", Redo),
         MenuItem::separator(),
@@ -135,10 +148,19 @@ pub fn build(cx: &App) -> Vec<Menu> {
         MenuItem::action("Find…", Search),
         MenuItem::action("Replace…", Replace),
     ];
-    if !macos {
-        edit.push(MenuItem::separator());
-        edit.push(MenuItem::action("Settings…", OpenSettings));
-    }
+
+    // VS Code collects the navigation commands in their own Go menu; Malgel
+    // used to scatter them across File and View.
+    let go = vec![
+        MenuItem::action("Show all commands…", CommandPalette),
+        MenuItem::separator(),
+        MenuItem::action("Go to file…", QuickOpen),
+        MenuItem::action("Go to heading…", GoToHeading),
+        MenuItem::action("Go to line…", GoToLine),
+        MenuItem::separator(),
+        MenuItem::action("Back", GoBack),
+        MenuItem::action("Forward", GoForward),
+    ];
 
     let format = vec![
         MenuItem::action("Bold", Bold),
@@ -208,7 +230,6 @@ pub fn build(cx: &App) -> Vec<Menu> {
         MenuItem::action("Tabs", ToggleTabs).checked(settings.tabs),
         MenuItem::action("File sidebar", ToggleFileSidebar).checked(settings.file_sidebar),
         MenuItem::action("Outline", ToggleOutline).checked(settings.outline_sidebar),
-        MenuItem::action("Go to heading…", GoToHeading),
         MenuItem::separator(),
         MenuItem::action("Sync scrolling", ToggleScrollSync).checked(settings.scroll_sync),
         MenuItem::action("Wrap lines", ToggleSoftWrap).checked(settings.soft_wrap),
@@ -259,6 +280,7 @@ pub fn build(cx: &App) -> Vec<Menu> {
     menus.extend([
         menu("File", file),
         menu("Edit", edit),
+        menu("Go", go),
         menu("Format", format),
         menu("View", view),
         menu("Help", help),

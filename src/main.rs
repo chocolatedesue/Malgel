@@ -5,6 +5,7 @@
 
 mod actions;
 mod analysis;
+mod commands;
 mod default_app;
 mod diagram;
 mod diagram_viewer;
@@ -12,6 +13,7 @@ mod document;
 mod document_view;
 mod docx;
 mod export;
+mod file_icon;
 mod file_tree;
 mod format;
 mod image_view;

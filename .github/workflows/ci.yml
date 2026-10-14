@@ -38,6 +38,14 @@ jobs:
       # class of break on the fast runner instead of in a release.
       - run: cargo build --locked
       - run: cargo test --locked
+      # The window itself, headless: Xvfb plus Mesa's software GL renderer.
+      # Mesa's Vulkan present path needs DRI3, which Xvfb lacks, so the smoke
+      # test renders through GL (see scripts/e2e/gui_smoke.sh).
+      - name: Install GUI test dependencies
+        run: |
+          sudo apt-get install -y xvfb xdotool imagemagick libgl1-mesa-dri \
+            libglx-mesa0 libegl1 libegl-mesa0 libgles2 libgbm1 fonts-dejavu-core
+      - run: scripts/e2e/gui_smoke.sh
 
   windows:
     runs-on: windows-latest
