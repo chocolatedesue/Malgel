@@ -38,6 +38,16 @@ is not considered).
   groups navigation the way VS Code does; **Settings** moved under File on
   Windows and Linux, matching File ▸ Preferences.
 
+## How it is checked
+
+`cargo test` covers the pieces (the key-binding table, the icon map, the
+formatting transforms). On top of that, `scripts/e2e/gui_smoke.sh` runs the
+real window headlessly and drives it the way a person would: it types into the
+open document and saves it, opens and filters the command palette, opens Quick
+Open, and presses Ctrl+B inside the editor to check Bold still wins there. It
+asserts on the results — the file on disk, the changed frame — so a shortcut
+that stops working fails the run. See `scripts/e2e/README.md`.
+
 ## What is left
 
 - **File tree editing**: new file and folder, rename (F2), delete, cut /

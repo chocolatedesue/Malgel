@@ -271,7 +271,9 @@ dictionaries and on macOS those in `~/Library/Spelling` are found too.
 | `src/settings.rs`, `src/themes.rs` | Preferences and theme application |
 | `build.rs`, `packaging/` | Windows exe icon and version info; app icon, bundles and installers |
 
-Run the tests with `cargo test`.
+Run the tests with `cargo test`. For an end-to-end check that the built app
+starts, paints and answers the keyboard, run `scripts/e2e/gui_smoke.sh` (needs
+Xvfb, xdotool and ImageMagick; see `scripts/e2e/README.md`).
 
 ## Acknowledgements
 
