@@ -258,7 +258,27 @@ shot 17-after-close-all
   || fail "Close All Editors closed the pinned editor too"
 pass "a pinned tab survives Close All Editors (Ctrl+K Ctrl+W)"
 
-# 9. Still alive at the end — no crash from any of the above.
+# 9. Find in Files (Ctrl+Shift+F): search the folder's files for text, then
+#    take a hit, type into the file it opened and save — so the assertion is
+#    on the file the hit came from, not on a changed frame.
+xdotool key --clearmodifiers ctrl+shift+f
+sleep 0.5
+xdotool type --delay 40 'SMOKE'
+xdotool key --clearmodifiers Return
+sleep 1.5
+shot 18-find-in-files
+[[ "$(pixels_differ 17-after-close-all 18-find-in-files)" -gt 1000 ]] \
+  || fail "Ctrl+Shift+F did not open the Find in Files results"
+xdotool key --clearmodifiers Return
+sleep 1.0
+shot 19-search-hit-open
+xdotool type --delay 30 'FOUND '
+xdotool key --clearmodifiers ctrl+s
+sleep 0.4
+grep -q 'FOUND' "$WS/renamed.md" || fail "the search hit did not open the file it came from"
+pass "Find in Files opens the file a hit came from (Ctrl+Shift+F)"
+
+# 10. Still alive at the end — no crash from any of the above.
 kill -0 "$APP_PID" 2>/dev/null || fail "process died during the run"
 pass "process alive at exit"
 
