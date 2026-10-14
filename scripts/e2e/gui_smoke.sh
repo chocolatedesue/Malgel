@@ -38,6 +38,20 @@ mkdir -p "$ART_DIR"
 rm -f "$ART_DIR"/*.png "$ART_DIR"/*.log 2>/dev/null || true
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Leave nothing behind: a run that stops early would otherwise leave the app
+# and its X server alive, and Malgel hands a second launch's arguments to a
+# running instance instead of opening a window — every later run would then
+# drive the stale window from the failed one.
+APP_PID=""
+XVFB_PID=""
+cleanup() {
+  [[ -n "$APP_PID" ]] && kill "$APP_PID" 2>/dev/null
+  [[ -n "$XVFB_PID" ]] && kill "$XVFB_PID" 2>/dev/null
+  rm -f "/tmp/.X${DISPLAY_NUM#:}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM#:}" 2>/dev/null
+  return 0
+}
+trap cleanup EXIT
 pass() { echo "  ok: $*"; }
 
 command -v Xvfb >/dev/null || fail "Xvfb not installed"
@@ -64,6 +78,7 @@ export DISPLAY="$DISPLAY_NUM"
 num="${DISPLAY_NUM#:}"
 start_xvfb() {
   pkill -f "Xvfb $DISPLAY_NUM" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
   sleep 0.3
   rm -f "/tmp/.X${num}-lock" "/tmp/.X11-unix/X${num}" 2>/dev/null || true
   Xvfb "$DISPLAY_NUM" -screen 0 1600x1000x24 +extension GLX +render -nolisten tcp \
@@ -96,6 +111,50 @@ printf 'fn main() { println!("hi"); }\n' >"$WS/src/main.rs"
 printf '{"a": 1}\n' >"$WS/config.json"
 printf '#!/bin/sh\necho hi\n' >"$WS/run.sh"
 printf 'name,qty\nwidget,3\n' >"$WS/data.csv"
+
+# A PDF for the viewer, written by hand so the check needs no exporter.
+python3 - "$WS/page.pdf" <<'PY_EOF'
+import sys
+
+W, H, PAGES = 612.0, 792.0, 3
+out = bytearray(b"%PDF-1.4\n")
+offsets = []
+
+
+def add(number, body):
+    offsets.append(len(out))
+    out.extend(f"{number} 0 obj\n".encode())
+    out.extend(body)
+    out.extend(b"\nendobj\n")
+
+
+add(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+kids = " ".join(f"{4 + ix} 0 R" for ix in range(PAGES))
+add(2, f"<< /Type /Pages /Kids [{kids}] /Count {PAGES} >>".encode())
+for ix in range(PAGES):
+    add(
+        4 + ix,
+        (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W:g} {H:g}] "
+            f"/Resources << >> /Contents {4 + PAGES + ix} 0 R >>"
+        ).encode(),
+    )
+for ix in range(PAGES):
+    stream = f"0.62 0.78 0.94 rg\n0 0 {W:g} {H:g} re\nf\n".encode()
+    add(4 + PAGES + ix, b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"endstream")
+
+xref_at = len(out)
+count = len(offsets) + 1
+out.extend(f"xref\n0 {count}\n".encode())
+out.extend(b"0000000000 65535 f \n")
+for offset in offsets:
+    out.extend(f"{offset:010d} 00000 n \n".encode())
+out.extend(
+    f"trailer\n<< /Size {count} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n".encode()
+)
+with open(sys.argv[1], "wb") as handle:
+    handle.write(out)
+PY_EOF
 
 shot() { # shot <name>
   sleep "$SETTLE"
@@ -309,7 +368,39 @@ sed -n '2p' "$WS/renamed.md" | grep -q 'FOUND' \
   || fail "the moved line did not land on line 2"
 pass "Alt+↓ moves the caret's line down (Ctrl+S round-trip)"
 
-# 11. Still alive at the end — no crash from any of the above.
+# 11. The PDF viewer: open the fixture and switch its page thumbnails on and
+#     off from the toolbar. A viewer has no text field to focus, and keyboard
+#     shortcuts do not reach one in this harness (see scripts/e2e/README.md),
+#     so this step clicks, the way a reader would.
+xdotool key --clearmodifiers ctrl+p
+sleep 0.6
+xdotool type --delay 40 'page'
+xdotool key --clearmodifiers Return
+sleep 2.0
+shot 20-pdf-open
+[[ "$(pixels_differ 19-search-hit-open 20-pdf-open)" -gt 1000 ]] \
+  || fail "Quick Open did not open the PDF"
+# The viewer's toolbar sits under its title; the thumbnails button is the
+# leftmost thing in it, at a fixed offset from the window's own corner.
+read -r win_x win_y <<<"$(xdotool getwindowgeometry "$WIN" |
+  awk '/Position/ { gsub(",", " "); print $2, $3 }')"
+xdotool mousemove $((win_x + 757)) $((win_y + 86))
+sleep 0.3
+xdotool click 1
+sleep 1.2
+shot 21-pdf-thumbnails
+[[ "$(pixels_differ 20-pdf-open 21-pdf-thumbnails)" -gt 2000 ]] \
+  || fail "the page thumbnails did not appear"
+xdotool click 1
+sleep 1.2
+shot 22-pdf-thumbnails-off
+# Back to within a scrollbar's worth of pixels of where it started: the two
+# frames are not identical to the last pixel, but the page is back.
+[[ "$(pixels_differ 20-pdf-open 22-pdf-thumbnails-off)" -lt 1500 ]] \
+  || fail "hiding the thumbnails did not put the page back"
+pass "PDF page thumbnails toggle from the toolbar"
+
+# 12. Still alive at the end — no crash from any of the above.
 kill -0 "$APP_PID" 2>/dev/null || fail "process died during the run"
 pass "process alive at exit"
 

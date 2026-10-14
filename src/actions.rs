@@ -44,6 +44,7 @@ actions!(
         ToggleTabs,
         ToggleFileSidebar,
         ToggleOutline,
+        TogglePdfThumbnails,
         ToggleSpellCheck,
         ToggleFocusMode,
         ToggleRestoreSession,

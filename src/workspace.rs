@@ -4121,6 +4121,9 @@ impl Render for Workspace {
                     doc.move_lines(format::LineMove::Down, window, cx)
                 })
             }))
+            .on_action(cx.listener(|this, _: &TogglePdfThumbnails, window, cx| {
+                this.with_active(window, cx, |doc, _window, cx| doc.toggle_pdf_thumbnails(cx))
+            }))
             .on_action(cx.listener(|this, _: &Bold, window, cx| {
                 this.with_active(window, cx, |doc, window, cx| {
                     doc.inline(format::Inline::Bold, window, cx)

@@ -44,7 +44,7 @@ use hayro_svg::{
     },
 };
 
-use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
+use crate::actions::{TogglePdfThumbnails, ZoomIn, ZoomOut, ZoomReset};
 use crate::zoom;
 
 /// How a document is zoomed when it is opened: the whole first page, the way
@@ -56,6 +56,24 @@ const DEFAULT_FIT: FitMode = FitMode::Page;
 const PAGE_GAP: f32 = 20.;
 /// Margin around the page column, in logical pixels.
 const PAGE_MARGIN: f32 = 24.;
+
+/// Width a page thumbnail is drawn at, in logical pixels.
+const THUMB_WIDTH: f32 = 96.;
+/// Padding around a thumbnail inside its cell, in logical pixels.
+const THUMB_PAD: f32 = 6.;
+/// Room under a thumbnail for its page number, in logical pixels.
+const THUMB_LABEL: f32 = 18.;
+/// The thumbnail strip's own width: a thumbnail, its padding and room for
+/// the strip's scrollbar.
+const THUMB_STRIP: f32 = THUMB_WIDTH + THUMB_PAD * 2. + 18.;
+
+/// The size a page's thumbnail is drawn at for a given thumbnail width.
+fn thumb_size(page: &PdfPage, width: f32) -> (f32, f32) {
+    if page.width <= 0. {
+        return (width, width);
+    }
+    (width, width * page.height / page.width)
+}
 
 /// How the zoom factor is chosen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,7 +258,12 @@ pub struct PdfView {
     spread: bool,
     /// The page currently at the top of the viewport.
     current_page: usize,
+    /// Whether the page thumbnails are shown beside the pages.
+    thumbnails: bool,
     scroll: VirtualListScrollHandle,
+    /// The thumbnails' own scroll position, so the strip and the pages move
+    /// independently.
+    thumb_scroll: VirtualListScrollHandle,
     focus_handle: FocusHandle,
 }
 
@@ -262,7 +285,9 @@ impl PdfView {
             custom_zoom: zoom::DEFAULT,
             spread: false,
             current_page: 0,
+            thumbnails: false,
             scroll: VirtualListScrollHandle::new(),
+            thumb_scroll: VirtualListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         }
     }
@@ -410,7 +435,39 @@ impl PdfView {
         // Rows hold one or two pages; scroll to the row showing this one.
         self.scroll
             .scroll_to_item(index / self.per_row(), ScrollStrategy::Top);
+        if self.thumbnails {
+            // Bring the thumbnail of the page we are going to into view, the
+            // way a PDF reader does. Scrolling the pages themselves does not
+            // move the strip, so the reader can browse it on its own.
+            self.thumb_scroll
+                .scroll_to_item(index, ScrollStrategy::Center);
+        }
         cx.notify();
+    }
+
+    /// Whether the page thumbnails are shown beside the pages.
+    pub fn shows_thumbnails(&self) -> bool {
+        self.thumbnails
+    }
+
+    /// Show or hide the page thumbnails.
+    pub fn set_thumbnails(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.thumbnails == shown {
+            return;
+        }
+        self.thumbnails = shown;
+        if shown {
+            // Open the strip on the page the reader is already on.
+            self.thumb_scroll
+                .scroll_to_item(self.current_page, ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
+    /// Show or hide the page thumbnails.
+    pub fn toggle_thumbnails(&mut self, cx: &mut Context<Self>) {
+        let shown = !self.thumbnails;
+        self.set_thumbnails(shown, cx);
     }
 
     /// The zoom factor a fit mode resolves to for a given viewport.
@@ -481,6 +538,18 @@ impl PdfView {
                 h_flex()
                     .gap_1()
                     .items_center()
+                    .child(
+                        Button::new("pdf-thumbnails")
+                            .ghost()
+                            .small()
+                            .compact()
+                            .icon(Icon::new(IconName::PanelLeft))
+                            .tooltip("Page thumbnails")
+                            .toggled(self.thumbnails)
+                            .disabled(total == 0)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_thumbnails(cx))),
+                    )
+                    .child(div().w(px(1.)).h_4().bg(theme.border).mx_1())
                     .child(
                         Button::new("pdf-fit-width")
                             .ghost()
@@ -607,6 +676,112 @@ impl PdfView {
                             })),
                     ),
             )
+    }
+
+    /// The page thumbnails beside the pages, when they are shown. Clicking
+    /// one jumps to that page, the way a PDF reader's page panel does.
+    fn render_thumbnails(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        if !self.thumbnails {
+            return None;
+        }
+        let cells = {
+            let doc = self.doc.as_ref()?;
+            if doc.pages.is_empty() {
+                return None;
+            }
+            doc.pages
+                .iter()
+                .map(|page| {
+                    let (width, height) = thumb_size(page, THUMB_WIDTH);
+                    gpui_kit::size(
+                        px(width + THUMB_PAD * 2.),
+                        px(height + THUMB_PAD * 2. + THUMB_LABEL),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let sizes: Rc<Vec<Size<Pixels>>> = Rc::new(cells);
+        let theme = cx.theme();
+        // The colours the cells need, copied out: the render closure below is
+        // `'static`, so it cannot hold on to a borrow of the theme.
+        let border = theme.border;
+        let muted = theme.muted_foreground;
+        let active = theme.list_active;
+        let current_border_colour = theme.primary;
+        Some(
+            div()
+                .id("pdf-thumbnails")
+                .w(px(THUMB_STRIP))
+                .h_full()
+                .flex_none()
+                .border_r_1()
+                .border_color(theme.border)
+                .child(
+                    v_virtual_list(
+                        cx.entity(),
+                        "pdf-thumbnail-pages",
+                        sizes,
+                        move |this, range: Range<usize>, _window, context| {
+                            let current = this.current_page;
+                            range
+                                .filter_map(|ix| {
+                                    let page = this.doc.as_ref()?.pages.get(ix)?.clone();
+                                    let (width, height) = thumb_size(&page, THUMB_WIDTH);
+                                    let image = this.doc.as_mut().and_then(|doc| doc.image(ix));
+                                    let current_border = if ix == current {
+                                        current_border_colour
+                                    } else {
+                                        border
+                                    };
+                                    Some(
+                                        v_flex()
+                                            .id(ElementId::NamedInteger(
+                                                "pdf-thumbnail".into(),
+                                                ix as u64,
+                                            ))
+                                            .w(px(width + THUMB_PAD * 2.))
+                                            .items_center()
+                                            .gap_1()
+                                            .p(px(THUMB_PAD))
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .when(ix == current, |this| this.bg(active))
+                                            .child(
+                                                div()
+                                                    .w(px(width))
+                                                    .h(px(height))
+                                                    .flex_none()
+                                                    .bg(rgb(0xffffff))
+                                                    .border_1()
+                                                    .border_color(current_border)
+                                                    .overflow_hidden()
+                                                    .children(image.map(|image| {
+                                                        img(image).w(px(width)).h(px(height))
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(page.page_number.to_string()),
+                                            )
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                context.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.go_to_page(ix, cx);
+                                                }),
+                                            )
+                                            .into_any_element(),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .track_scroll(&self.thumb_scroll),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_content(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
@@ -780,6 +955,9 @@ impl Render for PdfView {
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_in(cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_out(cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.reset_zoom(cx)))
+            .on_action(
+                cx.listener(|this, _: &TogglePdfThumbnails, _, cx| this.toggle_thumbnails(cx)),
+            )
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_pinch(cx.listener(|this, event: &PinchEvent, _, cx| this.on_pinch(event, cx)))
             .child(self.render_toolbar(cx))
@@ -791,8 +969,18 @@ impl Render for PdfView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .child(self.render_content(cx)),
+                    .flex()
+                    // The strip is outside the click handler below: double
+                    // clicking a thumbnail jumps to its page rather than
+                    // zooming the pages.
+                    .children(self.render_thumbnails(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                            .child(self.render_content(cx)),
+                    ),
             )
     }
 }
@@ -829,6 +1017,35 @@ mod tests {
     fn reports_error_on_invalid_pdf_bytes() {
         let invalid = b"NOT A VALID PDF FILE".to_vec();
         assert!(PdfDocument::from_bytes(invalid).is_err());
+    }
+
+    #[test]
+    fn thumbnails_keep_the_page_shape() {
+        let page = PdfPage {
+            index: 0,
+            page_number: 1,
+            width: 612.0,
+            height: 792.0,
+        };
+        let (width, height) = thumb_size(&page, THUMB_WIDTH);
+        assert_eq!(width, THUMB_WIDTH);
+        assert!((height - THUMB_WIDTH * 792.0 / 612.0).abs() < 0.001);
+
+        // A landscape page comes out wider than it is tall.
+        let wide = PdfPage {
+            width: 792.0,
+            height: 612.0,
+            ..page.clone()
+        };
+        let (_, short) = thumb_size(&wide, THUMB_WIDTH);
+        assert!(short < width);
+
+        // A page with no width does not divide by zero.
+        let empty = PdfPage {
+            width: 0.0,
+            ..page
+        };
+        assert_eq!(thumb_size(&empty, THUMB_WIDTH), (THUMB_WIDTH, THUMB_WIDTH));
     }
 
     #[test]
