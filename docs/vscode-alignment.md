@@ -68,6 +68,14 @@ is not considered).
 
 - **Go to Line** (Ctrl+G) and **Toggle Word Wrap** (Alt+Z).
 
+- **Current-line highlight.** The editor draws a band over the line the caret
+  is on, the way VS Code does, in `editor.active_line.background`
+  (`#F5F5F5` light, `#171717` dark). GPUI Kit's editor paints it from the
+  theme and both of Malgel's themes set that colour, so no Malgel code turns
+  it on or off — it is the editor's own default. It is listed here because
+  the alignment's first draft had it as still to do; it turned out to be
+  already there.
+
 - **Key bindings follow VS Code.** Where Malgel had taken a VS Code key for
   something else, the other command moved or lost its key:
 
@@ -104,8 +112,10 @@ shortcut or a command that stops working fails the run. See
 
 ## What is left
 
-- Editor niceties that depend on GPUI Kit's editor: current-line highlight,
-  bracket matching, indent guides, Ctrl+D multi-select, Alt+↑/↓ line moves.
+- Editor behaviour that GPUI Kit's editor does not offer yet: bracket
+  matching, indent guides, Ctrl+D (Select All Occurrences) and Alt+↑/↓ line
+  moves. Each needs a piece of the editor the library does not expose — an
+  action, a selection API or a renderer — so they wait on it, not on Malgel.
 
 ## Non-goals
 
