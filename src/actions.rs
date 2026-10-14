@@ -83,6 +83,8 @@ actions!(
         BulletList,
         NumberedList,
         TaskList,
+        MoveLineUp,
+        MoveLineDown,
     ]
 );
 
@@ -285,6 +287,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-alt-4", Heading(4), Some(EDITOR_CONTEXT)),
         KeyBinding::new("secondary-alt-5", Heading(5), Some(EDITOR_CONTEXT)),
         KeyBinding::new("secondary-alt-6", Heading(6), Some(EDITOR_CONTEXT)),
+        // VS Code's Move Line Up / Down. Plain Alt with an arrow is free:
+        // the editor library binds Ctrl+Alt+↑/↓ (and Shift+Alt+↑/↓) to adding
+        // a cursor above and below, and Alt+←/→ to moving by word, so this
+        // pair does not fight either.
+        KeyBinding::new("alt-up", MoveLineUp, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("alt-down", MoveLineDown, Some(EDITOR_CONTEXT)),
     ]);
 }
 

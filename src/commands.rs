@@ -194,6 +194,8 @@ pub fn groups() -> Vec<CommandGroupSpec> {
             cmd("Bulleted list", IconName::List, BulletList),
             cmd("Numbered list", IconName::ListOrdered, NumberedList),
             cmd("Task list", IconName::ListTodo, TaskList),
+            cmd("Move line up", IconName::ArrowUp, MoveLineUp),
+            cmd("Move line down", IconName::ArrowDown, MoveLineDown),
             cmd("Heading 1", IconName::Heading1, Heading(1)),
             cmd("Heading 2", IconName::Heading2, Heading(2)),
             cmd("Heading 3", IconName::Heading3, Heading(3)),
