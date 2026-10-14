@@ -125,6 +125,24 @@ dismiss() {
   sleep 0.2
   xdotool key --clearmodifiers Escape
 }
+# Poll for a condition instead of sleeping a fixed time before checking it. A
+# save, a rename or a search lands when it lands: a fixed sleep after Ctrl+S is
+# either wasted or too short. On a slow machine the write finished late, the
+# check read the file early, and step 9 failed while the same commit passed on
+# the fast CI runner. Making the assertion about the result rather than the
+# clock costs nothing when it is already true and waits when it is not.
+wait_for() { # wait_for <seconds> <command...>
+  local tries=$(( $1 * 10 ))
+  shift
+  local i
+  for ((i = 0; i < tries; i++)); do
+    if "$@"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
 
 echo "== malgel GUI smoke =="
 echo "binary:   $BIN"
@@ -158,7 +176,7 @@ xdotool type --delay 30 'SMOKE'
 sleep 0.3
 xdotool key --clearmodifiers ctrl+s
 shot 02-edited-and-saved
-grep -q 'SMOKE' "$WS/README.md" || fail "typed text was not saved to README.md"
+wait_for 5 grep -q 'SMOKE' "$WS/README.md" || fail "typed text was not saved to README.md"
 pass "typed text reached the file (edit + Ctrl+S round-trip)"
 
 # 3. Ctrl+Shift+P opens the command palette; typing filters it; Escape closes.
@@ -194,7 +212,7 @@ xdotool key --clearmodifiers ctrl+b
 sleep 0.3
 xdotool key --clearmodifiers ctrl+s
 shot 08-bold
-grep -q '\*\*' "$WS/README.md" || fail "Ctrl+B in the editor did not apply bold"
+wait_for 5 grep -q '\*\*' "$WS/README.md" || fail "Ctrl+B in the editor did not apply bold"
 pass "Ctrl+B in the editor applies bold (Ctrl+S round-trip)"
 
 # 6. The Explorer: Ctrl+Shift+E moves the keyboard into the file tree and
@@ -210,9 +228,9 @@ xdotool type --delay 40 'renamed.md'
 xdotool key --clearmodifiers Return
 sleep 0.8
 shot 11-after-rename
-[[ -f "$WS/renamed.md" ]] || fail "F2 in the Explorer did not rename the file on disk"
+wait_for 5 test -f "$WS/renamed.md" || fail "F2 in the Explorer did not rename the file on disk"
 [[ ! -e "$WS/README.md" ]] || fail "the old name is still on disk after the rename"
-grep -q 'SMOKE' "$WS/renamed.md" || fail "the renamed file lost its contents"
+wait_for 5 grep -q 'SMOKE' "$WS/renamed.md" || fail "the renamed file lost its contents"
 pass "F2 in the Explorer renames the picked file on disk"
 
 # 7. Close the editor showing a second file, then bring it back with
@@ -274,8 +292,7 @@ sleep 1.0
 shot 19-search-hit-open
 xdotool type --delay 30 'FOUND '
 xdotool key --clearmodifiers ctrl+s
-sleep 0.4
-grep -q 'FOUND' "$WS/renamed.md" || fail "the search hit did not open the file it came from"
+wait_for 5 grep -q 'FOUND' "$WS/renamed.md" || fail "the search hit did not open the file it came from"
 pass "Find in Files opens the file a hit came from (Ctrl+Shift+F)"
 
 # 10. Still alive at the end — no crash from any of the above.
