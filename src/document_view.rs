@@ -1002,6 +1002,24 @@ impl DocumentView {
         }
     }
 
+    /// Move the lines the caret is on up or down, the way VS Code's Move Line
+    /// Up / Down (Alt+↑ / Alt+↓) does. Nothing happens at the ends of the
+    /// document, which is what VS Code does too.
+    pub fn move_lines(
+        &mut self,
+        direction: format::LineMove,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.editor.read(cx).value().to_string();
+        let selection = self.editor.read(cx).selected_range();
+        if let Some(edit) = format::move_lines(&text, selection, direction) {
+            self.apply(edit, window, cx);
+        }
+        self.editor
+            .update(cx, |editor, cx| editor.focus(window, cx));
+    }
+
     /// Enter, Tab and Shift-Tab in the editor: continue lists, nest items,
     /// move between table cells. Returns whether the key was handled.
     fn smart_key(

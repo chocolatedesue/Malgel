@@ -4111,6 +4111,16 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &TidyTable, window, cx| {
                 this.with_active(window, cx, |doc, window, cx| doc.tidy_table(window, cx))
             }))
+            .on_action(cx.listener(|this, _: &MoveLineUp, window, cx| {
+                this.with_active(window, cx, |doc, window, cx| {
+                    doc.move_lines(format::LineMove::Up, window, cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &MoveLineDown, window, cx| {
+                this.with_active(window, cx, |doc, window, cx| {
+                    doc.move_lines(format::LineMove::Down, window, cx)
+                })
+            }))
             .on_action(cx.listener(|this, _: &Bold, window, cx| {
                 this.with_active(window, cx, |doc, window, cx| {
                     doc.inline(format::Inline::Bold, window, cx)

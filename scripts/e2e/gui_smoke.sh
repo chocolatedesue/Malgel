@@ -295,7 +295,21 @@ xdotool key --clearmodifiers ctrl+s
 wait_for 5 grep -q 'FOUND' "$WS/renamed.md" || fail "the search hit did not open the file it came from"
 pass "Find in Files opens the file a hit came from (Ctrl+Shift+F)"
 
-# 10. Still alive at the end — no crash from any of the above.
+# 10. Alt+↓ moves the caret's line down, the way VS Code's Move Line Down
+#     does. The caret is still on the line the search opened, so the check is
+#     on the file: the line that was first is second after saving.
+before="$(sed -n '1p' "$WS/renamed.md")"
+xdotool key --clearmodifiers alt+Down
+sleep 0.5
+xdotool key --clearmodifiers ctrl+s
+sleep 0.5
+[[ "$(sed -n '1p' "$WS/renamed.md")" != "$before" ]] \
+  || fail "Alt+Down did not move the first line down"
+sed -n '2p' "$WS/renamed.md" | grep -q 'FOUND' \
+  || fail "the moved line did not land on line 2"
+pass "Alt+↓ moves the caret's line down (Ctrl+S round-trip)"
+
+# 11. Still alive at the end — no crash from any of the above.
 kill -0 "$APP_PID" 2>/dev/null || fail "process died during the run"
 pass "process alive at exit"
 

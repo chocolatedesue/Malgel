@@ -181,6 +181,8 @@ pub fn build(cx: &App) -> Vec<Menu> {
         MenuItem::action("Numbered list", NumberedList),
         MenuItem::action("Task list", TaskList),
         MenuItem::action("Code block", CodeBlock),
+        MenuItem::action("Move line up", MoveLineUp),
+        MenuItem::action("Move line down", MoveLineDown),
         MenuItem::separator(),
         MenuItem::action("Tidy table", TidyTable),
     ];

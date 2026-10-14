@@ -216,6 +216,75 @@ pub fn toggle_block(text: &str, selection: Range<usize>, style: Block) -> Edit {
     }
 }
 
+/// Which way a block of lines moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineMove {
+    Up,
+    Down,
+}
+
+/// Move the lines the selection touches one line up or down, the way VS
+/// Code's Move Line Up / Down (Alt+↑ / Alt+↓, Option on macOS) does, and
+/// leave the selection on them.
+///
+/// `None` when there is nowhere to go — the first line up, the last one
+/// down — so the caller can leave the document alone.
+pub fn move_lines(text: &str, selection: Range<usize>, direction: LineMove) -> Option<Edit> {
+    let len = text.len();
+    let start = selection.start.min(len);
+    let end = selection.end.min(len);
+
+    // `split` keeps the document rebuildable (`parts.join("\n") == text`). A
+    // trailing empty part means the text ends in a newline; that is where the
+    // file stops, not a line of its own to move.
+    let mut parts: Vec<&str> = text.split('\n').collect();
+    let phantom = usize::from(parts.len() > 1 && parts.last() == Some(&""));
+    let lines = parts.len() - phantom;
+    if lines == 0 {
+        return None;
+    }
+
+    let mut starts = Vec::with_capacity(lines);
+    let mut offset = 0;
+    for part in &parts[..lines] {
+        starts.push(offset);
+        offset += part.len() + 1;
+    }
+    let line_at = |offset: usize| {
+        starts
+            .partition_point(|line_start| *line_start <= offset)
+            .saturating_sub(1)
+    };
+
+    let first = line_at(start);
+    // A selection that ends where a line begins does not reach into it.
+    let last = if end > start { line_at(end - 1) } else { first };
+
+    let moved = match direction {
+        LineMove::Up if first > 0 => {
+            let line = parts.remove(first - 1);
+            parts.insert(last, line);
+            first - 1
+        }
+        LineMove::Down if last + 1 < lines => {
+            let line = parts.remove(last + 1);
+            parts.insert(first, line);
+            first + 1
+        }
+        _ => return None,
+    };
+
+    // Where the block lands, so the selection travels with it.
+    let block_start: usize = parts[..moved].iter().map(|part| part.len() + 1).sum();
+    let shift = |offset: usize| offset + block_start - starts[first];
+
+    Some(Edit {
+        range: 0..len,
+        text: parts.join("\n"),
+        selection: shift(start)..shift(end),
+    })
+}
+
 /// Split a line into its indentation, its block marker and its content.
 fn split_marker(line: &str) -> (&str, &str, &str) {
     let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
@@ -408,5 +477,51 @@ mod tests {
         let text = "é";
         let edit = toggle_inline(text, 1..1, Inline::Bold);
         assert_eq!(apply(text, &edit), "**é**");
+    }
+
+    #[test]
+    fn moves_the_line_the_caret_is_on_up_and_down() {
+        let text = "one\ntwo\nthree\n";
+        let down = move_lines(text, 4..4, LineMove::Down).expect("room below");
+        assert_eq!(apply(text, &down), "one\nthree\ntwo\n");
+        assert_eq!(down.selection, 10..10);
+
+        let up = move_lines(text, 4..4, LineMove::Up).expect("room above");
+        assert_eq!(apply(text, &up), "two\none\nthree\n");
+        assert_eq!(up.selection, 0..0);
+    }
+
+    #[test]
+    fn a_selection_travels_with_the_block_it_moves() {
+        let text = "a\nb\nc\nd";
+        let edit = move_lines(text, 2..5, LineMove::Down).expect("room below");
+        let moved = apply(text, &edit);
+        assert_eq!(moved, "a\nd\nb\nc");
+        assert_eq!(&moved[edit.selection.clone()], "b\nc");
+    }
+
+    #[test]
+    fn there_is_nowhere_to_go_at_the_ends() {
+        let text = "a\nb\nc\n";
+        assert!(move_lines(text, 0..0, LineMove::Up).is_none());
+        assert!(move_lines(text, 4..4, LineMove::Down).is_none());
+        assert!(move_lines("", 0..0, LineMove::Up).is_none());
+        assert!(move_lines("", 0..0, LineMove::Down).is_none());
+        // A caret after the trailing newline is on the file's last line, not
+        // on a line below it.
+        assert!(move_lines(text, 6..6, LineMove::Down).is_none());
+    }
+
+    #[test]
+    fn the_trailing_newline_survives_a_move_and_is_not_a_line() {
+        let text = "a\nb\n";
+        let edit = move_lines(text, 0..0, LineMove::Down).expect("room below");
+        assert_eq!(apply(text, &edit), "b\na\n");
+        assert_eq!(edit.selection, 2..2);
+
+        // Without a trailing newline the two lines still swap cleanly.
+        let edit = move_lines("a\nb", 2..2, LineMove::Up).expect("room above");
+        assert_eq!(apply("a\nb", &edit), "b\na");
+        assert_eq!(edit.selection, 0..0);
     }
 }
