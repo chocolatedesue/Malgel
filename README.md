@@ -60,6 +60,11 @@ A fast, native Markdown editor and previewer written in pure Rust with
   images embedded) for mail, word processors and web editors, with the
   Markdown as the plain-text alternative.
 - **Go to heading.** An outline palette (Ctrl+Shift+O) jumps to any heading.
+- **PDF viewing.** PDFs open in a viewer of their own: continuous scrolling,
+  fit-width / fit-page / custom zoom, one page or two side by side, and a page
+  thumbnail strip you can browse and click to jump by (the button at the left
+  of its toolbar). Pages are drawn as vector sheets on demand and cached, so a
+  long document opens and scrolls smoothly.
 - **Documents done right.** Atomic saves, UTF-8 with byte-order-mark
   handling, CRLF files stay CRLF (switch a document between LF and CRLF from
   the status bar), unsaved-changes prompts on new, open, close and quit,
@@ -268,6 +273,7 @@ dictionaries and on macOS those in `~/Library/Spelling` are found too.
 | `src/smart_edit.rs` | List continuation and nesting, table navigation and tidying, paste as link — pure and tested |
 | `src/file_tree.rs` | The file sidebar: the tree, and creating, renaming, deleting, cutting, copying and pasting entries |
 | `src/search.rs` | Find in Files: searching the open folder's files for text, pure and tested |
+| `src/pdf_view.rs` | The PDF viewer: pages drawn on demand, zoom and fits, and the page thumbnails |
 | `src/commands.rs` | The command palette's grouped command list, and the Action behind each row |
 | `src/file_icon.rs` | The icon a file type draws with, in the tree, tabs and palette |
 | `src/spell.rs` | Spell checking of prose with Hunspell dictionaries |

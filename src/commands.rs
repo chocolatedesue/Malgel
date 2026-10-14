@@ -170,6 +170,11 @@ pub fn groups() -> Vec<CommandGroupSpec> {
             cmd("Preview", IconName::Eye, SetLayout(Layout::Preview)),
             cmd("Tabs", IconName::ListTree, ToggleTabs),
             cmd("Pin or unpin tab", IconName::Pin, PinTab),
+            cmd(
+                "PDF page thumbnails",
+                IconName::PanelLeft,
+                TogglePdfThumbnails,
+            ),
             cmd("File sidebar", IconName::PanelLeft, ToggleFileSidebar),
             cmd("Outline", IconName::ListTree, ToggleOutline),
             cmd("Focus mode", IconName::Maximize2, ToggleFocusMode),
