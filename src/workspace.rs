@@ -13,10 +13,11 @@ use std::{
 };
 
 use gpui_kit::{
-    Anchor, App, AppContext as _, Bounds, Context, DragMoveEvent, Entity, EntityId, ExternalPaths,
-    FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, PathPromptOptions, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, WindowBounds,
+    Anchor, App, AppContext as _, Bounds, ClipboardItem, Context, DragMoveEvent, Entity, EntityId,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement as _, PathPromptOptions, Pixels, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    WindowBounds,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -2329,6 +2330,19 @@ impl Workspace {
         }
     }
 
+    /// Switch the open document between LF and CRLF, the way clicking the EOL
+    /// item in VS Code's status bar does. The text is untouched; the document
+    /// is marked unsaved and saving writes the new ending.
+    fn toggle_line_ending(&mut self, _: &ToggleLineEnding, _: &mut Window, cx: &mut Context<Self>) {
+        let doc = self.active_document();
+        if doc.read(cx).is_media() {
+            return;
+        }
+        let next = doc.read(cx).line_ending().toggled();
+        doc.update(cx, |doc, cx| doc.set_line_ending(next, cx));
+        cx.notify();
+    }
+
     fn on_drop_paths(
         &mut self,
         paths: &ExternalPaths,
@@ -3001,6 +3015,7 @@ impl Workspace {
                         let name = doc.name().to_string();
                         // The tab carries its file's type icon, as in VS Code.
                         let tab_icon = doc.path().map(|path| file_icon(path));
+                        let tab_path = doc.path().cloned();
                         let theme = cx.theme();
                         let doc_weak = doc_entity.clone();
                         let ws_menu = workspace.clone();
@@ -3187,6 +3202,7 @@ impl Workspace {
                             )
                             .context_menu({
                                 let ws = ws_menu.clone();
+                                let path = tab_path.clone();
                                 move |menu, _, _| {
                                     let ws_close = ws.clone();
                                     let ws_other = ws.clone();
@@ -3194,47 +3210,79 @@ impl Workspace {
                                     let ws_pin = ws.clone();
                                     let doc = doc_weak.clone();
 
-                                    menu.item(
-                                        PopupMenuItem::new(if is_pinned { "Unpin" } else { "Pin" })
+                                    let menu = menu
+                                        .item(
+                                            PopupMenuItem::new(if is_pinned {
+                                                "Unpin"
+                                            } else {
+                                                "Pin"
+                                            })
                                             .on_click(move |_, _, cx| {
                                                 _ = ws_pin.update(cx, |this, cx| {
                                                     this.toggle_pin_by_id(doc_id, cx);
                                                 });
                                             }),
-                                    )
-                                    .item(PopupMenuItem::new("Close").on_click(
-                                        move |_, window, cx| {
-                                            _ = ws_close.update(cx, |this, cx| {
-                                                let id = doc.entity_id();
-                                                this.confirm_unsaved(
-                                                    doc.clone(),
-                                                    AfterConfirm::CloseDocument(id),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        },
-                                    ))
-                                    .item(
-                                        PopupMenuItem::new("Close Other Tabs")
-                                            .disabled(!has_other)
-                                            .on_click(move |_, window, cx| {
-                                                _ = ws_other.update(cx, |this, cx| {
-                                                    this.close_other_tabs_by_id(doc_id, window, cx);
-                                                });
-                                            }),
-                                    )
-                                    .item(
-                                        PopupMenuItem::new("Close Tabs to the Right")
-                                            .disabled(is_last)
-                                            .on_click(move |_, window, cx| {
-                                                _ = ws_right.update(cx, |this, cx| {
-                                                    this.close_tabs_to_the_right_by_id(
-                                                        doc_id, window, cx,
+                                        )
+                                        .item(PopupMenuItem::new("Close").on_click(
+                                            move |_, window, cx| {
+                                                _ = ws_close.update(cx, |this, cx| {
+                                                    let id = doc.entity_id();
+                                                    this.confirm_unsaved(
+                                                        doc.clone(),
+                                                        AfterConfirm::CloseDocument(id),
+                                                        window,
+                                                        cx,
                                                     );
                                                 });
-                                            }),
-                                    )
+                                            },
+                                        ))
+                                        .item(
+                                            PopupMenuItem::new("Close Other Tabs")
+                                                .disabled(!has_other)
+                                                .on_click(move |_, window, cx| {
+                                                    _ = ws_other.update(cx, |this, cx| {
+                                                        this.close_other_tabs_by_id(
+                                                            doc_id, window, cx,
+                                                        );
+                                                    });
+                                                }),
+                                        )
+                                        .item(
+                                            PopupMenuItem::new("Close Tabs to the Right")
+                                                .disabled(is_last)
+                                                .on_click(move |_, window, cx| {
+                                                    _ = ws_right.update(cx, |this, cx| {
+                                                        this.close_tabs_to_the_right_by_id(
+                                                            doc_id, window, cx,
+                                                        );
+                                                    });
+                                                }),
+                                        );
+
+                                    // The document's file, when it has one. An
+                                    // untitled buffer has nowhere to reveal or
+                                    // copy, so these rows only appear for a
+                                    // saved file, as in VS Code.
+                                    match path.clone() {
+                                        Some(path) => {
+                                            let text = path.display().to_string();
+                                            let reveal = path.clone();
+                                            menu.item(PopupMenuItem::new("Copy Path").on_click(
+                                                move |_, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(text.clone()),
+                                                    );
+                                                },
+                                            ))
+                                            .item(
+                                                PopupMenuItem::new("Reveal in File Manager")
+                                                    .on_click(move |_, _, cx| {
+                                                        cx.reveal_path(&reveal);
+                                                    }),
+                                            )
+                                        }
+                                        None => menu,
+                                    }
                                 }
                             })
                     })),
@@ -3437,7 +3485,27 @@ impl Workspace {
                                 .replace('_', "-"),
                         ))
                     })
-                    .child(item(line_ending.label().to_string()))
+                    // VS Code's status bar switches the line ending when its
+                    // EOL item is clicked; Malgel toggles LF and CRLF there
+                    // too. A media viewer has no text to re-save, so it keeps
+                    // a plain label.
+                    .when(doc.is_media(), |this| {
+                        this.child(item(line_ending.label().to_string()))
+                    })
+                    .when(!doc.is_media(), |this| {
+                        this.child(
+                            Button::new("line-ending")
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .label(line_ending.label())
+                                .tooltip("Select End of Line Sequence")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(ToggleLineEnding), cx)
+                                }),
+                        )
+                    })
+                    .child(item("Spaces: 2".to_string()))
                     .child(item("Markdown".to_string())),
             )
     }
@@ -3991,6 +4059,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::copy_rich_text))
             .on_action(cx.listener(Self::reveal_in_folder))
             .on_action(cx.listener(Self::close_document))
+            .on_action(cx.listener(Self::toggle_line_ending))
             .on_action(cx.listener(Self::close_all_tabs))
             .on_action(cx.listener(Self::reopen_closed_editor))
             .on_action(cx.listener(Self::pin_tab))

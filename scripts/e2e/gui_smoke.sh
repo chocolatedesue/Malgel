@@ -309,7 +309,22 @@ sed -n '2p' "$WS/renamed.md" | grep -q 'FOUND' \
   || fail "the moved line did not land on line 2"
 pass "Alt+↓ moves the caret's line down (Ctrl+S round-trip)"
 
-# 11. Still alive at the end — no crash from any of the above.
+# 11. Switching the line ending, the way clicking the EOL item in VS Code's
+#     status bar does: the palette command flips LF to CRLF, and saving writes
+#     the file with carriage returns. The assertion is on the bytes on disk.
+xdotool key --clearmodifiers ctrl+shift+p
+sleep 0.5
+xdotool type --delay 40 'end of line'
+sleep 0.4
+xdotool key --clearmodifiers Return
+sleep 0.5
+xdotool key --clearmodifiers ctrl+s
+shot 20-line-ending
+wait_for 5 grep -q $'\r' "$WS/renamed.md" \
+  || fail "the EOL toggle did not save the file with CRLF"
+pass "changing the line ending saves the file with CRLF"
+
+# 12. Still alive at the end — no crash from any of the above.
 kill -0 "$APP_PID" 2>/dev/null || fail "process died during the run"
 pass "process alive at exit"
 
