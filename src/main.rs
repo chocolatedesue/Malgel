@@ -26,6 +26,7 @@ pub mod pdf_view;
 mod preview_ext;
 mod quick_open;
 mod rich_copy;
+mod search;
 mod session;
 mod settings;
 mod smart_edit;

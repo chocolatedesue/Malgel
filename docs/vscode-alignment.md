@@ -27,6 +27,15 @@ is not considered).
   VS Code uses coloured Seti icons; Malgel uses the single-colour GPUI Kit
   set, so files differ by shape, not colour.
 
+- **Find in Files** (Ctrl+Shift+F). Asks what to look for, searches the text
+  of every file under the open folder — the same ignore-aware walk Quick Open
+  uses — and lists the lines that hold it as `path:line  text`. Confirming a
+  line opens the file with the caret on it. `src/search.rs` holds the search
+  itself, off the UI thread; a file that is not UTF-8, or that holds a NUL
+  byte, is skipped rather than guessed at. Matching is VS Code's smart case: a
+  query with no uppercase letter matches either case, one with an uppercase
+  letter matches exactly.
+
 - **The Explorer's commands** (Ctrl+Shift+E shows the sidebar, focuses the
   tree and picks the open file). While the tree has the keyboard its keys are
   VS Code's, and they mean nothing outside it — in the editor Del still
@@ -65,7 +74,7 @@ is not considered).
   | Key | VS Code | Malgel before | Now |
   | --- | --- | --- | --- |
   | Ctrl+B | Toggle Side Bar | Ctrl+Shift+B | Ctrl+B from the workspace; Bold still takes Ctrl+B inside the editor |
-  | Ctrl+Shift+F | Find in Files | Focus mode | freed; Focus mode moved to Ctrl+Alt+F |
+  | Ctrl+Shift+F | Find in Files | Focus mode | Find in Files; Focus mode moved to Ctrl+Alt+F |
   | Ctrl+Shift+E | Explorer | Export as HTML | Explorer; Export is in the File menu |
   | Ctrl+Shift+L | Select All Occurrences | Switch light and dark | freed; the switch is in the View menu |
 
@@ -87,13 +96,14 @@ way a person would. It types into the open document and saves it; opens,
 filters and confirms the command palette; opens Quick Open and picks a file;
 presses Ctrl+B inside the editor to check Bold still wins there; focuses the
 Explorer and renames the picked file with F2; closes an editor and brings it
-back with Ctrl+Shift+T; and pins a tab. It asserts on the results — the file
-on disk, the changed frame, the editor pane a pinned tab keeps — so a shortcut
-or a command that stops working fails the run. See `scripts/e2e/README.md`.
+back with Ctrl+Shift+T; pins a tab; and searches the folder with Ctrl+Shift+F,
+taking a hit and typing into the file it opened. It asserts on the results —
+the file on disk, the changed frame, the editor pane a pinned tab keeps — so a
+shortcut or a command that stops working fails the run. See
+`scripts/e2e/README.md`.
 
 ## What is left
 
-- **Cross-file search** (Ctrl+Shift+F), now that the key is free.
 - Editor niceties that depend on GPUI Kit's editor: current-line highlight,
   bracket matching, indent guides, Ctrl+D multi-select, Alt+↑/↓ line moves.
 

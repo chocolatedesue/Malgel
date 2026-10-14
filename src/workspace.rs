@@ -55,6 +55,7 @@ use crate::{
     links::{self, LinkTarget},
     pdf::{self, Paper},
     quick_open, rich_copy,
+    search::{self, Hit},
     session::{self, DiskStamp, Session, SessionDocument, WindowPlacement},
     settings::{Appearance, Layout, LinkPlacement, clamp_font_size},
     spell,
@@ -144,6 +145,17 @@ enum TreePromptKind {
     Rename,
 }
 
+/// Where a document being opened should land once it has loaded.
+#[derive(Clone, Debug)]
+enum Target {
+    /// The top of the document.
+    Top,
+    /// The heading with this text.
+    Heading(String),
+    /// This line, the way a Find in Files hit names one.
+    Line(usize),
+}
+
 /// What the watcher found for one open file.
 enum DiskChange {
     Missing,
@@ -208,6 +220,10 @@ pub struct Workspace {
     go_to_line: Entity<CommandState>,
     /// The one-line prompt New File / New Folder / Rename ask their name in.
     tree_prompt: Entity<CommandState>,
+    /// Find in Files (Ctrl+Shift+F): one for the query it asks for, one for
+    /// the hits it lists.
+    find_query: Entity<CommandState>,
+    find_results: Entity<CommandState>,
     file_tree: Entity<FileTree>,
     app_menu_bar: Entity<AppMenuBar>,
 
@@ -258,6 +274,8 @@ impl Workspace {
         let command_palette = cx.new(|cx| CommandState::new(window, cx));
         let go_to_line = cx.new(|cx| CommandState::new(window, cx));
         let tree_prompt = cx.new(|cx| CommandState::new(window, cx));
+        let find_query = cx.new(|cx| CommandState::new(window, cx));
+        let find_results = cx.new(|cx| CommandState::new(window, cx));
         let file_tree = cx.new(FileTree::new);
 
         let subscriptions = vec![
@@ -338,6 +356,8 @@ impl Workspace {
             command_palette,
             go_to_line,
             tree_prompt,
+            find_query,
+            find_results,
             file_tree,
             app_menu_bar,
             window_title: String::new(),
@@ -776,17 +796,17 @@ impl Workspace {
                 );
                 return;
             }
-            self.load_path(path, placement, None, window, cx);
+            self.load_path(path, placement, Target::Top, window, cx);
         }
     }
 
     /// Read `path` in the background and show it where `placement` says,
-    /// scrolled to the heading `anchor` names, if any.
+    /// landing where `target` says once it has loaded.
     fn load_path(
         &mut self,
         path: PathBuf,
         placement: Placement,
-        anchor: Option<String>,
+        target: Target,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -875,8 +895,12 @@ impl Workspace {
                         )
                     });
                     this.place_document(doc.clone(), placement, window, cx);
-                    if let Some(anchor) = anchor {
-                        this.reveal_anchor(&doc, &anchor, window, cx);
+                    match target {
+                        Target::Top => {}
+                        Target::Heading(anchor) => this.reveal_anchor(&doc, &anchor, window, cx),
+                        Target::Line(line) => {
+                            doc.update(cx, |doc, cx| doc.go_to_line(line, window, cx))
+                        }
                     }
                 }
                 Err(err) => {
@@ -1549,35 +1573,35 @@ impl Workspace {
         self.file_tree.update(cx, |tree, cx| tree.select_last(cx));
     }
 
-    /// Ask for a name in a one-line prompt, the way Go to Line asks for a
-    /// line: the palette's single row never filters, and its query is the
-    /// name. Confirming hands the text straight to `apply_tree_name`.
-    fn prompt_tree_name(
-        &mut self,
-        kind: TreePromptKind,
+    /// Ask for one line of text in a dialog, the way Go to Line asks for a
+    /// number: the palette's single row never filters, so its query box is
+    /// the prompt. Confirming hands what was typed to `apply`.
+    ///
+    /// The dialog's own dispatch cannot reach the window's workspace, so the
+    /// callback that carries the text through is called on the workspace
+    /// itself rather than dispatched as an action (see `show_command_palette`).
+    fn prompt_line(
+        state: &Entity<CommandState>,
+        title: SharedString,
+        placeholder: SharedString,
         initial: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
+        apply: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) {
         if window.has_active_dialog(cx) {
             return;
         }
-        let (title, placeholder) = match kind {
-            TreePromptKind::NewFile => ("New file", "File name"),
-            TreePromptKind::NewFolder => ("New folder", "Folder name"),
-            TreePromptKind::Rename => ("Rename", "New name"),
-        };
-        self.tree_prompt
-            .update(cx, |state, cx| state.set_query(initial, window, cx));
-        let state = self.tree_prompt.clone();
+        state.update(cx, |state, cx| state.set_query(initial, window, cx));
+        let state = state.clone();
         let workspace = cx.weak_entity();
-        let title: SharedString = title.into();
-        let placeholder: SharedString = placeholder.into();
+        let apply = Rc::new(apply);
         window.open_dialog(cx, move |dialog, window, cx| {
             let focus = state.read(cx).focus_handle(cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));
             let typed = state.clone();
             let workspace = workspace.clone();
+            let apply = apply.clone();
             dialog.close_button(false).p_0().child(
                 Command::new(&state)
                     .bordered(false)
@@ -1587,13 +1611,160 @@ impl Workspace {
                     .item(CommandItem::new().label(title.clone()).keywords(["name"]))
                     .on_confirm(move |_, window, cx| {
                         window.close_dialog(cx);
-                        let name = typed.read(cx).query(cx).to_string();
-                        _ = workspace
-                            .update(cx, |this, cx| this.apply_tree_name(kind, name, window, cx));
+                        let text = typed.read(cx).query(cx).to_string();
+                        _ = workspace.update(cx, |this, cx| apply(this, text, window, cx));
                     })
                     .on_cancel(|window, cx| window.close_dialog(cx)),
             )
         });
+    }
+
+    /// Ask for the name of a new file, folder or rename.
+    fn prompt_tree_name(
+        &mut self,
+        kind: TreePromptKind,
+        initial: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (title, placeholder) = match kind {
+            TreePromptKind::NewFile => ("New file", "File name"),
+            TreePromptKind::NewFolder => ("New folder", "Folder name"),
+            TreePromptKind::Rename => ("Rename", "New name"),
+        };
+        Self::prompt_line(
+            &self.tree_prompt.clone(),
+            title.into(),
+            placeholder.into(),
+            initial,
+            window,
+            cx,
+            move |this, name, window, cx| this.apply_tree_name(kind, name, window, cx),
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Find in Files
+
+    /// Ask what to look for, then search the open folder's files for it, the
+    /// way VS Code's Search view (Ctrl+Shift+F) does.
+    fn find_in_files(&mut self, _: &FindInFiles, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_tree.read(cx).root().is_none() {
+            window.push_notification(Notification::info("Open a folder to search its files."), cx);
+            return;
+        }
+        Self::prompt_line(
+            &self.find_query.clone(),
+            "Find in files".into(),
+            "Text to find".into(),
+            "",
+            window,
+            cx,
+            |this, query, window, cx| this.search_folder(query, window, cx),
+        );
+    }
+
+    /// Walk the folder's files and search their text.
+    fn search_folder(&mut self, needle: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.file_tree.read(cx).root().map(Path::to_path_buf) else {
+            return;
+        };
+        if needle.is_empty() {
+            return;
+        }
+        // The walk and the reads are off the UI thread: a folder of notes
+        // runs to thousands of files, and the window used to sit still while
+        // Quick Open listed them for the same reason.
+        let show_hidden = AppSettings::get(cx).show_hidden_entries;
+        let opened = self.file_tree.read(cx).expanded_folders();
+        let walk_root = root.clone();
+        let wanted = needle.clone();
+        let listing = cx.background_executor().spawn(async move {
+            let files =
+                quick_open::files_under(&walk_root, show_hidden, &opened, quick_open::MAX_FILES);
+            search::search_files(&files, &wanted, search::MAX_HITS)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let hits = listing.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                this.open_find_results(root, needle, hits, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// List what the search found; confirming a line opens the file it came
+    /// from with the caret on it.
+    fn open_find_results(
+        &mut self,
+        root: PathBuf,
+        query: String,
+        hits: Vec<Hit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        if hits.is_empty() {
+            window.push_notification(Notification::info(format!("No matches for “{query}”.")), cx);
+            return;
+        }
+        self.find_results
+            .update(cx, |state, cx| state.set_query("", window, cx));
+        let state = self.find_results.clone();
+        let workspace = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let focus = state.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+            let items = hits.iter().map(|hit| {
+                let shown = hit
+                    .path
+                    .strip_prefix(&root)
+                    .unwrap_or(hit.path.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let label: SharedString = format!("{shown}:{}  {}", hit.line, hit.text).into();
+                CommandItem::new()
+                    .label(label)
+                    .keywords([shown, hit.text.clone()])
+                    .icon(Icon::new(file_icon(&hit.path)))
+            });
+            let picked = hits.clone();
+            let workspace = workspace.clone();
+            dialog.close_button(false).p_0().child(
+                Command::new(&state)
+                    .bordered(false)
+                    .placeholder("Filter the matches")
+                    .max_h(rems(24.))
+                    .items(items)
+                    .empty(|_, _, _| "No matching lines")
+                    .on_confirm(move |index: IndexPath, window, cx| {
+                        window.close_dialog(cx);
+                        let Some(hit) = picked.get(index.row).cloned() else {
+                            return;
+                        };
+                        _ = workspace.update(cx, |this, cx| this.open_hit(&hit, window, cx));
+                    })
+                    .on_cancel(|window, cx| window.close_dialog(cx)),
+            )
+        });
+    }
+
+    /// Show the file a hit came from, on its line.
+    fn open_hit(&mut self, hit: &Hit, window: &mut Window, cx: &mut Context<Self>) {
+        let path = hit.path.clone();
+        if let Some(ix) = self
+            .documents
+            .iter()
+            .position(|doc| doc.read(cx).path() == Some(&path))
+        {
+            self.activate(ix, window, cx);
+            let doc = self.documents[ix].clone();
+            doc.update(cx, |doc, cx| doc.go_to_line(hit.line, window, cx));
+            return;
+        }
+        self.load_path(path, Placement::Default, Target::Line(hit.line), window, cx);
     }
 
     /// Carry out the name a tree prompt collected.
@@ -1789,11 +1960,15 @@ impl Workspace {
             AfterConfirm::NewFile => self.new_document(window, cx),
             AfterConfirm::OpenDialog => self.prompt_open(window, cx),
             AfterConfirm::OpenPath(path) => {
-                self.load_path(path, Placement::Default, None, window, cx)
+                self.load_path(path, Placement::Default, Target::Top, window, cx)
             }
-            AfterConfirm::OpenLink(path, anchor) => {
-                self.load_path(path, Placement::ReplaceActive, anchor, window, cx)
-            }
+            AfterConfirm::OpenLink(path, anchor) => self.load_path(
+                path,
+                Placement::ReplaceActive,
+                anchor.map(Target::Heading).unwrap_or(Target::Top),
+                window,
+                cx,
+            ),
             AfterConfirm::CloseDocument(id) => {
                 self.discarded.remove(&id);
                 self.remove_document(id, window, cx);
@@ -1903,7 +2078,13 @@ impl Workspace {
             return;
         }
         if new_tab {
-            self.load_path(path, Placement::NewTab, anchor, window, cx);
+            self.load_path(
+                path,
+                Placement::NewTab,
+                anchor.map(Target::Heading).unwrap_or(Target::Top),
+                window,
+                cx,
+            );
         } else {
             self.confirm_unsaved(
                 self.active_document().clone(),
@@ -1942,7 +2123,7 @@ impl Workspace {
             };
             _ = this.update_in(cx, |this, window, cx| {
                 for path in paths {
-                    this.load_path(path, Placement::Default, None, window, cx);
+                    this.load_path(path, Placement::Default, Target::Top, window, cx);
                 }
             });
         })
@@ -3841,6 +4022,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::go_to_line_at))
             .on_action(cx.listener(Self::show_quick_open))
             .on_action(cx.listener(Self::open_quick_path))
+            .on_action(cx.listener(Self::find_in_files))
             .on_action(cx.listener(Self::toggle_appearance))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::open_settings))

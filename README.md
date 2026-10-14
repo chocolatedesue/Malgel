@@ -190,7 +190,7 @@ see [docs/RELEASING.md](docs/RELEASING.md), which also covers code signing.
 ## Keyboard shortcuts
 
 Ctrl is ⌘ on macOS. The bindings follow VS Code's defaults; where Malgel has
-nothing to bind, the key is left free (Find in Files, Ctrl+Shift+F, for one).
+nothing to bind — editor groups, an embedded terminal — the key is left free.
 
 | Command | Shortcut |
 | --- | --- |
@@ -208,6 +208,7 @@ nothing to bind, the key is left free (Find in Files, Ctrl+Shift+F, for one).
 | Go to file…, Go to line… | Ctrl+P, Ctrl+G |
 | Go to heading… | Ctrl+Shift+O |
 | Back / forward through the editors shown | Alt+← / Alt+→ |
+| Find in files… | Ctrl+Shift+F |
 | Find…, Replace… | Ctrl+F, Ctrl+H |
 | Toggle word wrap | Alt+Z |
 | Bold, Italic, Strikethrough | Ctrl+B, Ctrl+I, Ctrl+Shift+X |
@@ -263,6 +264,7 @@ dictionaries and on macOS those in `~/Library/Spelling` are found too.
 | `src/document_view.rs` | One document: editor and preview, scroll sync, smart keys and paste, spelling, focus mode, recovery |
 | `src/smart_edit.rs` | List continuation and nesting, table navigation and tidying, paste as link — pure and tested |
 | `src/file_tree.rs` | The file sidebar: the tree, and creating, renaming, deleting, cutting, copying and pasting entries |
+| `src/search.rs` | Find in Files: searching the open folder's files for text, pure and tested |
 | `src/commands.rs` | The command palette's grouped command list, and the Action behind each row |
 | `src/file_icon.rs` | The icon a file type draws with, in the tree, tabs and palette |
 | `src/spell.rs` | Spell checking of prose with Hunspell dictionaries |

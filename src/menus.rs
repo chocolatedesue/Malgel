@@ -146,6 +146,7 @@ pub fn build(cx: &App) -> Vec<Menu> {
         MenuItem::action("Select all", SelectAll),
         MenuItem::separator(),
         MenuItem::action("Find…", Search),
+        MenuItem::action("Find in files…", FindInFiles),
         MenuItem::action("Replace…", Replace),
     ];
 

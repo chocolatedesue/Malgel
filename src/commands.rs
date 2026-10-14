@@ -135,6 +135,7 @@ pub fn groups() -> Vec<CommandGroupSpec> {
     let edit = group(
         "Edit",
         vec![
+            cmd("Find in files…", IconName::Search, FindInFiles),
             cmd("Copy as rich text", IconName::Clipboard, CopyRichText),
             cmd("Tidy table", IconName::List, TidyTable),
         ],

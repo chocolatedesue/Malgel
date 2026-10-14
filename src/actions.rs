@@ -57,6 +57,7 @@ actions!(
         GoToLine,
         CommandPalette,
         QuickOpen,
+        FindInFiles,
         NewFileInTree,
         NewFolderInTree,
         RenameInTree,
@@ -228,6 +229,7 @@ pub fn bind_keys(cx: &mut App) {
         // VS Code gives Ctrl+Shift+F to Find in Files; focus mode moves aside
         // so the key is free for it.
         KeyBinding::new("secondary-alt-f", ToggleFocusMode, workspace),
+        KeyBinding::new("secondary-shift-f", FindInFiles, workspace),
         KeyBinding::new("secondary-alt-c", CopyRichText, workspace),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-`", SummonTerminal, workspace),
