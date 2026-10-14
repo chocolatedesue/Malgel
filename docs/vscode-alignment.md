@@ -66,6 +66,13 @@ is not considered).
 - **Back / forward** through the editors shown (Alt+← / Alt+→). The history is
   the sequence of files the window has shown, so it walks tabs and files alike.
 
+- **Move Line Up / Down** (Alt+↑ / Alt+↓). The lines the selection touches
+  move as one block and the selection travels with them; at the ends of the
+  document nothing happens, as in VS Code. The editor library has no action
+  for this, so `src/format.rs` owns it as a pure text transform, like the
+  other formatting commands. Plain Alt with an arrow is free: the library
+  binds Ctrl+Alt+↑/↓ (and Shift+Alt+↑/↓) to adding a cursor above and below.
+
 - **Go to Line** (Ctrl+G) and **Toggle Word Wrap** (Alt+Z).
 
 - **Current-line highlight.** The editor draws a band over the line the caret
@@ -104,8 +111,9 @@ way a person would. It types into the open document and saves it; opens,
 filters and confirms the command palette; opens Quick Open and picks a file;
 presses Ctrl+B inside the editor to check Bold still wins there; focuses the
 Explorer and renames the picked file with F2; closes an editor and brings it
-back with Ctrl+Shift+T; pins a tab; and searches the folder with Ctrl+Shift+F,
-taking a hit and typing into the file it opened. It asserts on the results —
+back with Ctrl+Shift+T; pins a tab; searches the folder with Ctrl+Shift+F,
+taking a hit and typing into the file it opened; and moves that line down with
+Alt+↓. It asserts on the results —
 the file on disk, the changed frame, the editor pane a pinned tab keeps — so a
 shortcut or a command that stops working fails the run. See
 `scripts/e2e/README.md`.

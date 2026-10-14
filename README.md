@@ -215,6 +215,7 @@ nothing to bind — editor groups, an embedded terminal — the key is left free
 | Inline code, Link, Code block | Ctrl+E, Ctrl+K, Ctrl+Shift+C |
 | Heading 1–6 | Ctrl+Alt+1 … Ctrl+Alt+6 |
 | Quote, Bulleted, Numbered, Task list | Ctrl+Shift+., Ctrl+Shift+8, Ctrl+Shift+7, Ctrl+Shift+9 |
+| Move the caret's line up / down | Alt+↑, Alt+↓ |
 | Zoom in / out / actual size | Ctrl+=, Ctrl+-, Ctrl+0 |
 
 While the file tree has the keyboard — click a folder row, or press

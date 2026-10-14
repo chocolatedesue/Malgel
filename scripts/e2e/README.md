@@ -24,7 +24,9 @@ application that starts, paints and responds.
 8. Searches the folder's files with `Ctrl+Shift+F`, takes the first hit, and
    types into the file the hit opened — so the check is on the file the hit
    came from, not on a changed frame.
-9. Checks the process is still alive at the end (no crash from any step).
+9. Moves that line down with `Alt+↓` and saves, checking the file's first two
+   lines swapped.
+10. Checks the process is still alive at the end (no crash from any step).
 
 Screenshots land in `target/e2e-artifacts/` for eyeballing after a failure.
 
