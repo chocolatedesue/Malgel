@@ -100,6 +100,9 @@ pub struct DocumentView {
 
     path: Option<PathBuf>,
     line_ending: LineEnding,
+    /// The line ending last read from or written to disk, so that changing
+    /// only the line ending still counts as an unsaved change.
+    saved_line_ending: LineEnding,
     /// The text last read from or written to disk.
     saved_hash: u64,
     dirty: bool,
@@ -205,6 +208,7 @@ impl DocumentView {
             preview,
             path: None,
             line_ending: LineEnding::Lf,
+            saved_line_ending: LineEnding::Lf,
             saved_hash: content_hash(""),
             dirty: false,
             disk: None,
@@ -349,6 +353,7 @@ impl DocumentView {
             markdown_extensions,
             path: Some(path),
             line_ending: LineEnding::Lf,
+            saved_line_ending: LineEnding::Lf,
             saved_hash: 0,
             dirty: false,
             disk: None,
@@ -395,6 +400,7 @@ impl DocumentView {
             image: None,
             path: Some(path),
             line_ending: LineEnding::Lf,
+            saved_line_ending: LineEnding::Lf,
             saved_hash: 0,
             dirty: false,
             disk: None,
@@ -427,7 +433,9 @@ impl DocumentView {
         if self.pdf.is_some() || self.image.is_some() {
             return false;
         }
-        self.dirty
+        // A change of line ending alone is an unsaved change, the way VS Code
+        // marks the file modified when its EOL is switched.
+        self.dirty || self.line_ending != self.saved_line_ending
     }
 
     /// Whether this document shows a media view (PDF or image) rather than
@@ -466,6 +474,18 @@ impl DocumentView {
         self.line_ending
     }
 
+    /// Switch the line ending the document is saved with — LF or CRLF — the
+    /// way clicking the EOL item in VS Code's status bar does. The text is
+    /// unchanged (it is held normalised to `\n`), so the document is only
+    /// marked unsaved; saving writes the new ending.
+    pub fn set_line_ending(&mut self, line_ending: LineEnding, cx: &mut Context<Self>) {
+        if self.line_ending == line_ending {
+            return;
+        }
+        self.line_ending = line_ending;
+        cx.notify();
+    }
+
     pub fn disk_stamp(&self) -> Option<DiskStamp> {
         self.disk
     }
@@ -492,7 +512,7 @@ impl DocumentView {
     /// An untitled document nobody has typed into, which opening a file may
     /// replace without asking.
     pub fn is_blank(&self) -> bool {
-        self.path.is_none() && !self.dirty
+        self.path.is_none() && !self.is_dirty()
     }
 
     pub fn cursor(&self, cx: &App) -> usize {
@@ -540,6 +560,7 @@ impl DocumentView {
         self.disk = path.as_deref().and_then(DiskStamp::of);
         self.path = path;
         self.line_ending = line_ending;
+        self.saved_line_ending = line_ending;
         self.dirty = false;
         self.synced_editor_scroll = None;
         self.editor
@@ -568,6 +589,9 @@ impl DocumentView {
         } else {
             LineEnding::Lf
         };
+        self.saved_line_ending = saved
+            .as_ref()
+            .map_or(LineEnding::Lf, |saved| saved.line_ending);
         self.saved_hash = saved.map_or(content_hash(""), |saved| content_hash(&saved.text));
         self.recovery_id = id;
         self.recovery_written = true;
@@ -680,6 +704,7 @@ impl DocumentView {
         }
         let text = self.editor.read(cx).value();
         crate::document::save(path, &text, self.line_ending)?;
+        self.saved_line_ending = self.line_ending;
         self.saved_hash = content_hash(&text);
         self.dirty = self.source.as_ref() != text.as_ref();
         self.path = Some(path.to_path_buf());

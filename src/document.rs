@@ -28,6 +28,15 @@ impl LineEnding {
             LineEnding::CrLf => "CRLF",
         }
     }
+
+    /// The other convention, for switching a document between the two the way
+    /// clicking the EOL item in VS Code's status bar does.
+    pub fn toggled(self) -> Self {
+        match self {
+            LineEnding::Lf => LineEnding::CrLf,
+            LineEnding::CrLf => LineEnding::Lf,
+        }
+    }
 }
 
 /// Text read from disk, normalized to `\n` line endings for editing.
@@ -201,6 +210,26 @@ mod tests {
         assert_eq!(LineEnding::detect("a\r\nb"), LineEnding::CrLf);
         assert_eq!(LineEnding::detect("a\nb\r\n"), LineEnding::Lf);
         assert_eq!(LineEnding::detect("no newline"), LineEnding::Lf);
+    }
+
+    /// Clicking the status bar's EOL item flips the document between the two
+    /// conventions, and the flipped ending is what gets written.
+    #[test]
+    fn toggling_the_line_ending_changes_what_is_saved() {
+        let dir = std::env::temp_dir().join(format!("malgel-eol-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.md");
+
+        let lf = LineEnding::Lf;
+        assert_eq!(lf.toggled(), LineEnding::CrLf);
+        assert_eq!(lf.toggled().toggled(), LineEnding::Lf);
+
+        save(&path, "a\nb\n", lf.toggled()).unwrap();
+        assert_eq!(load(&path).unwrap().line_ending, LineEnding::CrLf);
+        save(&path, "a\nb\n", lf.toggled().toggled()).unwrap();
+        assert_eq!(load(&path).unwrap().line_ending, LineEnding::Lf);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

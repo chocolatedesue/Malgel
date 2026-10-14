@@ -99,6 +99,11 @@ pub fn groups() -> Vec<CommandGroupSpec> {
             cmd("Open folder…", IconName::FolderOpen, OpenFolder),
             cmd("Save", IconName::Save, Save),
             cmd("Save as…", IconName::Save, SaveAs),
+            cmd(
+                "Change end of line sequence",
+                IconName::ArrowLeftRight,
+                ToggleLineEnding,
+            ),
             cmd("Export as HTML…", IconName::FileOutput, ExportHtml),
             cmd("Export as PDF…", IconName::FileOutput, ExportPdf),
             cmd("Export as Word document…", IconName::FileOutput, ExportDocx),

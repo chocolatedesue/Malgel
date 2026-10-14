@@ -66,6 +66,17 @@ is not considered).
 - **Back / forward** through the editors shown (Alt+← / Alt+→). The history is
   the sequence of files the window has shown, so it walks tabs and files alike.
 
+- **A tab's own menu** carries **Copy Path** and **Reveal in File Manager**,
+  as VS Code's does. Both act on that tab's file and only appear once it has
+  one — an untitled buffer has no path to copy or reveal.
+
+- **The status bar** reads like VS Code's. The line ending is a button:
+  clicking it switches the document between LF and CRLF (the text is
+  untouched; the file is marked unsaved and saving writes the new ending, the
+  way VS Code's *Change End of Line Sequence* does). Beside it sit the indent
+  size (`Spaces: 2`, the editor's tab size) and the language — `Markdown`,
+  which is the only one Malgel edits.
+
 - **Move Line Up / Down** (Alt+↑ / Alt+↓). The lines the selection touches
   move as one block and the selection travels with them; at the ends of the
   document nothing happens, as in VS Code. The editor library has no action
@@ -112,8 +123,9 @@ filters and confirms the command palette; opens Quick Open and picks a file;
 presses Ctrl+B inside the editor to check Bold still wins there; focuses the
 Explorer and renames the picked file with F2; closes an editor and brings it
 back with Ctrl+Shift+T; pins a tab; searches the folder with Ctrl+Shift+F,
-taking a hit and typing into the file it opened; and moves that line down with
-Alt+↓. It asserts on the results —
+taking a hit and typing into the file it opened; moves that line down with
+Alt+↓; and switches the line ending to CRLF, checking the bytes on disk. It
+asserts on the results —
 the file on disk, the changed frame, the editor pane a pinned tab keeps — so a
 shortcut or a command that stops working fails the run. See
 `scripts/e2e/README.md`.
@@ -121,9 +133,11 @@ shortcut or a command that stops working fails the run. See
 ## What is left
 
 - Editor behaviour that GPUI Kit's editor does not offer yet: bracket
-  matching, indent guides, Ctrl+D (Select All Occurrences) and Alt+↑/↓ line
-  moves. Each needs a piece of the editor the library does not expose — an
-  action, a selection API or a renderer — so they wait on it, not on Malgel.
+  matching, indent guides and Ctrl+D (Select All Occurrences). Each needs a
+  piece of the editor the library does not expose — an action, a selection
+  API or a renderer — so they wait on it, not on Malgel. They are also the
+  code-editing side of VS Code rather than the document side Malgel aims at,
+  so they are not being pursued.
 
 ## Non-goals
 

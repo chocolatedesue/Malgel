@@ -29,6 +29,7 @@ actions!(
         CloseTabsToTheRight,
         CloseWindow,
         ReopenClosedEditor,
+        ToggleLineEnding,
         PinTab,
         NextTab,
         PreviousTab,

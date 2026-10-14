@@ -61,8 +61,9 @@ A fast, native Markdown editor and previewer written in pure Rust with
   Markdown as the plain-text alternative.
 - **Go to heading.** An outline palette (Ctrl+Shift+O) jumps to any heading.
 - **Documents done right.** Atomic saves, UTF-8 with byte-order-mark
-  handling, CRLF files stay CRLF, unsaved-changes prompts on new, open,
-  close and quit, recent files, drag and drop to open.
+  handling, CRLF files stay CRLF (switch a document between LF and CRLF from
+  the status bar), unsaved-changes prompts on new, open, close and quit,
+  recent files, drag and drop to open.
 - **Nothing lost.** Unsaved changes are written aside a second after you
   stop typing and come back after a crash. Files changed by another program
   reload by themselves, or, when you have unsaved edits, Malgel asks which
@@ -87,7 +88,8 @@ A fast, native Markdown editor and previewer written in pure Rust with
   Tokyo Night) selectable separately for light and dark.
 - **Zoom.** Ctrl+= / Ctrl+- scale the entire interface, not just the text.
 - **Live statistics.** Words (CJK-aware), characters, reading time, caret
-  position and selection size in the status bar.
+  position and selection size in the status bar, beside the line ending, the
+  indent size and the language.
 
 ### Optional features
 
